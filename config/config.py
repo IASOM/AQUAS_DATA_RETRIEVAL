@@ -46,7 +46,7 @@ class DemandConfig(Config):
     FINAL_UP_FILE = PIPELINE_DATA_DIR / "finals" / "demanda_UP.csv"
 
     # Reference data
-    UP_RS_FILE = Path(os.getenv("UP_RS_FILE", Config.BASE_DIR / "UP per RS.xlsx"))
+    UP_RS_FILE = Path(os.getenv("UP_RS_FILE", Config.BASE_DIR / "UPperRS.xlsx"))
     UP_RS_SHEET = "UP per RS"
 
     # Date settings
@@ -84,7 +84,7 @@ class DiagnosisConfig(Config):
     FINAL_UP_FILE = PIPELINE_DATA_DIR / "finals" / "selected_UP.csv"
 
     # Reference data
-    UP_RS_FILE = Path(os.getenv("UP_RS_FILE", Config.BASE_DIR / "UP per RS.xlsx"))
+    UP_RS_FILE = Path(os.getenv("UP_RS_FILE", Config.BASE_DIR / "UPperRS.xlsx"))
     UP_RS_SHEET = "UP per RS"
 
     # Date settings

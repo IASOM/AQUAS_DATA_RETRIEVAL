@@ -271,8 +271,13 @@ def run_diagnosis_pipeline_main_optimized(config) -> None:
         schema=config.SCHEMA,
         table_name=config.TABLE_NAME,
         date_column=config.DATE_COLUMN,
+<<<<<<< HEAD
         up_column=config.UP_COLUMN,
         diag_code_column=config.DIAG_CODE_COLUMN,
+=======
+        up_column="up_c",
+        diag_code_column="problema_salut_C",
+>>>>>>> d800335 (Fix requirements and setup files)
         up_rs=pd.read_excel(config.UP_RS_FILE, sheet_name=config.UP_RS_SHEET),
         incremental_dir=config.PIPELINE_DATA_DIR / "incremental",
         final_file=config.PIPELINE_DATA_DIR / "finals" / "diagnosis_final.parquet",

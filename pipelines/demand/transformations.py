@@ -1,5 +1,6 @@
 import pandas as pd
 
+<<<<<<< HEAD
 
 def prepare_visits_chunk(df: pd.DataFrame, up_rs: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -69,3 +70,7 @@ def prepare_visits_chunk(df: pd.DataFrame, up_rs: pd.DataFrame) -> pd.DataFrame:
             out[col] = out[col].astype(str).fillna("NA").str.strip()
 
     return out
+=======
+def prepare_visits_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+    return chunk
+>>>>>>> d800335 (Fix requirements and setup files)
