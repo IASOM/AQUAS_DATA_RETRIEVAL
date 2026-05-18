@@ -180,16 +180,20 @@ def add_incremental_diagnosis_optimized(
 
     new_df[timestamp_col] = pd.to_datetime(new_df[timestamp_col])
 
-    # Create unique identifier for deduplication
-    new_df["data_id"] = (
-        new_df[timestamp_col].astype(str)
-        + "_"
-        + new_df[code_col].astype(str)
-        + "_"
-        + new_df.get("UP", "UNKNOWN").astype(str)
-    )
+    id_parts = [new_df[timestamp_col].astype(str)]
 
-    # Add to manager
+    if code_col in new_df.columns:
+        id_parts.append(new_df[code_col].astype(str))
+
+    if "UP" in new_df.columns:
+        id_parts.append(new_df["UP"].astype(str))
+    elif "RS" in new_df.columns:
+        id_parts.append(new_df["RS"].astype(str))
+
+    new_df["data_id"] = id_parts[0]
+    for part in id_parts[1:]:
+        new_df["data_id"] = new_df["data_id"] + "_" + part
+
     manager.add_data(new_df, timestamp_col=timestamp_col)
 
 

@@ -30,6 +30,9 @@ def build_daily_total_cat_optimized(
     # Ensure datetime
     df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")
 
+    if value_col not in df.columns:
+        df[value_col] = 1
+
     # Vectorized groupby - much faster than iterating
     result = df.groupby(date_column, observed=True)[value_col].sum().to_frame()
     result.columns = ["DEMANDA_TOTAL"]
@@ -58,6 +61,15 @@ def build_daily_features_by_group_optimized(
         Wide DataFrame with daily features
     """
     df = df.copy()
+
+    if value_col not in df.columns:
+        df[value_col] = 1
+
+    if group_col not in df.columns:
+        if "UP" in df.columns:
+            df[group_col] = df["UP"]
+        else:
+            df[group_col] = "NA"
 
     # Ensure datetime
     df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")

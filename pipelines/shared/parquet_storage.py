@@ -59,10 +59,8 @@ class ParquetIncrementalManager:
         df = self._optimize_dtypes(df)
 
         # Split into chunks and save
-        num_chunks = max(1, len(df) // self.chunk_size)
-        chunk_dfs = np.array_split(df, num_chunks) if num_chunks > 1 else [df]
-
-        for i, chunk in enumerate(chunk_dfs):
+        for i, start in enumerate(range(0, len(df), self.chunk_size)):
+            chunk = df.iloc[start:start + self.chunk_size].copy()
             chunk_path = (
                 self.output_dir
                 / f"incremental_{pd.Timestamp.now():%Y%m%d_%H%M%S}_{i:03d}.parquet"
