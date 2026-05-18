@@ -1,335 +1,266 @@
-# PREDAP Data Pipeline Project
+# AQUAS / PREDAP Data Pipelines
 
-A comprehensive data pipeline system for processing demand and diagnosis data from SQL Server/Azure Synapse databases.
+Projecte Python per extreure dades de SQL Server / Azure Synapse, transformar-les i generar sortides Parquet per a l'analisi de demanda assistencial i diagnostics.
 
-## Project Overview
+La versio activa del projecte es la implementacio optimitzada amb Parquet. El comandament principal es:
 
-This project contains two main data processing pipelines:
-
-- **Demand Pipeline**: Processes visit data to generate demand metrics aggregated by region (CAT, RS, UP)
-- **Diagnosis Pipeline**: Processes and filters visit data by diagnosis codes for detailed analysis
-
-Both pipelines follow an incremental processing model, loading only new data since the last run and maintaining state for resumability.
-
-## Project Structure
-
-```
-GIT/
-├── config/                          # Centralized configuration
-│   └── config.py                   # Pipeline configuration management
-├── data/                           # Data directories (created at runtime)
-│   ├── demand_pipeline/
-│   │   ├── state/                 # Pipeline state files
-│   │   ├── incremental/           # Incremental output files
-│   │   └── finals/                # Final aggregated outputs
-│   └── diagnosis_pipeline/
-│       ├── state/
-│       ├── selected_codes/
-│       ├── incremental/
-│       └── finals/
-├── pipelines/                      # Pipeline implementations
-│   ├── shared/                     # Shared utilities and database code
-│   │   ├── __init__.py
-│   │   ├── db.py                  # Database connection functions
-│   │   ├── utils.py               # Data processing utilities
-│   │   └── logging_config.py      # Logging setup
-│   ├── demand/                     # Demand pipeline modules
-│   │   ├── __init__.py
-│   │   ├── config.py              # Demand-specific config
-│   │   ├── main.py                # Pipeline entry point
-│   │   ├── incremental.py         # Incremental processing logic
-│   │   ├── aggregation.py         # Final aggregation logic
-│   │   ├── transformations.py     # Data transformations
-│   │   └── utils.py               # Demand-specific utilities
-│   └── diagnosis/                  # Diagnosis pipeline modules
-│       ├── __init__.py
-│       ├── config.py
-│       ├── diagnosis_main.py       # Pipeline entry point
-│       ├── incremental.py
-│       ├── aggregation.py
-│       ├── transformations.py
-│       └── utils.py
-├── src/                            # [DEPRECATED] Old structure - can be removed
-├── requirements.txt                # Python dependencies
-├── .env.example                    # Environment variables template
-├── README.md                       # This file
-└── run_pipeline.py                 # Main entry point for running pipelines
+```bash
+python run_pipeline.py
 ```
 
-## Installation
+`run_pipeline.py` es mante com a entrada estable i delega internament a `run_pipeline_optimized.py`.
 
-### Prerequisites
+## Que fa el projecte
 
-- Python 3.9+
+El codi implementa dos pipelines principals:
+
+| Pipeline | Taula origen | Objectiu | Sortida principal |
+| --- | --- | --- | --- |
+| Demanda | `z_inv.P1038_visites` | Comptar visites per dia i generar variables agregades per Catalunya, RS i UP | `data/demand_pipeline/finals/demand_final.parquet` |
+| Diagnostics | `z_inv.P1038_prstb015r_filtrat` | Comptar diagnostics per dia, codi diagnostic, RS i UP, opcionalment filtrant per codis seleccionats | `data/diagnosis_pipeline/finals/diagnosis_final.parquet` |
+
+També pot unir les dues sortides finals en un sol fitxer:
+
+```text
+data/finals/demand_diagnosis_joined.parquet
+```
+
+## Flux general
+
+1. Carrega la configuracio des de variables d'entorn i valors per defecte a `config/config.py`.
+2. Obre connexio ODBC a SQL Server / Azure Synapse.
+3. Detecta el rang de dates disponible a la taula origen.
+4. Processa les dades per anys per reduir consum de memoria.
+5. Neteja i transforma camps de data, UP, RS, tipus de visita o codi diagnostic.
+6. Escriu fitxers incrementals en Parquet dins `data/*/incremental/`.
+7. Reconstrueix la sortida final en Parquet dins `data/*/finals/`.
+8. Opcionalment fa un join per `timestamp` entre demanda i diagnostics.
+
+## Estructura actual
+
+```text
+AQUAS_INTEGRATION/
+  config/
+    config.py
+  pipelines/
+    shared/
+      db.py
+      utils.py
+      parquet_storage.py
+      final_joiner.py
+      logging_config.py
+    demand/
+      incremental_optimized.py
+      aggregation_optimized.py
+      transformations.py
+    diagnosis/
+      incremental_optimized.py
+      aggregation_optimized.py
+      __init__.py
+  data/
+    demand_pipeline/
+    diagnosis_pipeline/
+    finals/
+  src/
+    ... codi legacy
+  run_pipeline.py
+  run_pipeline_optimized.py
+  requirements.txt
+  .env.example
+  UPperRS.xlsx
+```
+
+## Instal·lacio
+
+Requisits:
+
+- Python 3.9 o superior
 - ODBC Driver 18 for SQL Server
-- Access to SQL Server/Azure Synapse database
+- Acces a la base de dades `aquas`
 
-### Setup Steps
+Preparacio:
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd GIT
-   ```
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+Copy-Item .env.example .env
+python setup.py
+```
 
-2. **Create a virtual environment**:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+Edita `.env` amb els valors reals de connexio i rutes locals.
 
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Configuracio
 
-4. **Configure environment variables**:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your database credentials and paths
-   ```
-
-5. **Set up data directories**:
-   ```bash
-   mkdir -p data/demand_pipeline/{state,incremental,finals}
-   mkdir -p data/diagnosis_pipeline/{state,incremental,finals,selected_codes}
-   ```
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file in the project root:
+Variables principals:
 
 ```env
-# Database Configuration
-DB_SERVER=your-server.sql.azuresynapse.net
-DB_DATABASE=your_database
+DB_SERVER=synw-aquas.sql.azuresynapse.net
+DB_DATABASE=aquas
 AUTH_MODE=ActiveDirectoryIntegrated
-
-# Base Paths
-BASE_DIR=/path/to/project
-UP_RS_FILE=/path/to/UP_per_RS.xlsx
-
-# Logging
+BASE_DIR=C:/path/to/AQUAS_INTEGRATION
+UP_RS_FILE=C:/path/to/AQUAS_INTEGRATION/UPperRS.xlsx
 LOG_LEVEL=INFO
 ```
 
-### Python Configuration
+`UP_RS_FILE` ha d'apuntar a l'Excel amb el full `UP per RS`. El pipeline utilitza aquest fitxer per mapar codis UP a RS.
 
-See [config/config.py](config/config.py) for detailed configuration options. You can:
+## Execucio
 
-- Override environment variables with system variables
-- Modify date ranges for processing
-- Configure input/output file paths
-
-## Running the Pipelines
-
-### Run Both Pipelines
+Executar demanda i diagnostics:
 
 ```bash
-python run_pipeline.py --both
+python run_pipeline.py
 ```
 
-### Run Demand Pipeline Only
+Executar nomes demanda:
 
 ```bash
 python run_pipeline.py --demand
 ```
 
-### Run Diagnosis Pipeline Only
+Executar nomes diagnostics:
 
 ```bash
 python run_pipeline.py --diagnosis
 ```
 
-### View Help
+Executar demanda, diagnostics i join final:
+
+```bash
+python run_pipeline.py --all
+```
+
+Executar amb dades sintetiques locals, sense connexio a la base de dades:
+
+```bash
+python run_pipeline.py --sample --all
+```
+
+Aquest mode llegeix els CSVs de `data/sample/input/` i escriu els Parquet a `data/sample/output/`.
+
+Fer nomes el join de finals ja generats:
+
+```bash
+python run_pipeline.py --join-final
+```
+
+Veure opcions disponibles:
 
 ```bash
 python run_pipeline.py --help
 ```
 
-## Pipeline Workflow
+## Sortides
 
-Both pipelines follow this workflow:
+| Fitxer | Contingut |
+| --- | --- |
+| `data/demand_pipeline/incremental/*.parquet` | Blocs incrementals de demanda |
+| `data/demand_pipeline/finals/demand_final.parquet` | Matriu final de demanda |
+| `data/diagnosis_pipeline/incremental/*.parquet` | Blocs incrementals de diagnostics |
+| `data/diagnosis_pipeline/finals/diagnosis_final.parquet` | Matriu final de diagnostics |
+| `data/finals/demand_diagnosis_joined.parquet` | Demanda i diagnostics units per `timestamp` |
+| `data/sample/output/` | Sortides generades pel mode `--sample` |
 
-1. **Check State**: Load the last processed date from state file
-2. **Query Database**: Fetch new data since last run
-3. **Transform Data**: Apply business logic transformations
-4. **Incremental Output**: Save new data to incremental files
-5. **Aggregation**: Combine incremental and final files
-6. **Update State**: Record the last processed date
+## Dades sintetiques
 
-### State Management
+El projecte inclou dades petites d'exemple per provar el pipeline sense ODBC ni permisos de base de dades:
 
-Pipeline state is stored in `data/{pipeline}_pipeline/state/state.json`:
+| Fitxer | Contingut |
+| --- | --- |
+| `data/sample/input/up_rs.csv` | Mapping UP -> RS |
+| `data/sample/input/demand_visits.csv` | Visites sintetiques per al pipeline de demanda |
+| `data/sample/input/diagnosis_visits.csv` | Diagnostics sintetics |
+| `data/sample/input/selected_codes.csv` | Codis diagnostics que es conservaran en el filtre |
 
-```json
-{
-  "last_loaded_date": "2024-05-06T00:00:00",
-  "updated_at": "2024-05-06T10:30:45.123456"
-}
-```
-
-This allows pipelines to resume from where they left off without reprocessing data.
-
-## Shared Utilities
-
-Common functions are available in [pipelines/shared/](pipelines/shared/):
-
-### Database Functions ([pipelines/shared/db.py](pipelines/shared/db.py))
-- `get_connection()` - Establish database connection
-- `get_min_max_date()` - Get data range from table
-- `get_year_ranges()` - Generate year-based date ranges
-- `get_data_for_year()` - Query data for specific year/date range
-
-### Data Processing ([pipelines/shared/utils.py](pipelines/shared/utils.py))
-- `load_state()` / `save_state()` - Manage pipeline state
-- `load_output_matrix()` / `save_output_matrix()` - Handle CSV files with datetime index
-- `ensure_daily_range()` - Ensure continuous daily time series
-- `load_last_date_from_output()` - Get max date from output file
-
-## Development Guidelines
-
-### Adding New Features
-
-1. Add shared utilities to `pipelines/shared/`
-2. Pipeline-specific code goes in `pipelines/{demand|diagnosis}/`
-3. Update configuration in `config/config.py` if needed
-4. Update `requirements.txt` for new dependencies
-
-### Code Style
-
-- Follow PEP 8 conventions
-- Use type hints for function parameters and returns
-- Add docstrings to functions and modules
-- Use descriptive variable names
-
-### Testing
-
-Create tests in a `tests/` directory (to be added):
+Comandes utils:
 
 ```bash
-pytest tests/
+python run_pipeline.py --sample --demand
+python run_pipeline.py --sample --diagnosis
+python run_pipeline.py --sample --all
+python run_pipeline.py --sample --join-final
 ```
 
-## Troubleshooting
-
-### Database Connection Issues
-
-- Verify `DB_SERVER` and `DB_DATABASE` are correct
-- Check ODBC Driver 18 installation: `odbcconf /s`
-- Ensure authentication credentials are valid
-- Check network connectivity to database server
-
-### Missing Data Files
-
-- Verify `BASE_DIR` and `UP_RS_FILE` paths are correct
-- Ensure data directories exist
-- Check file permissions
-
-### State File Issues
-
-- Delete state file to force full reprocessing:
-  ```bash
-  rm data/demand_pipeline/state/state.json
-  rm data/diagnosis_pipeline/state/state.json
-  ```
-- State will be recreated on next run
-
-### Import Errors
-
-- Verify virtual environment is activated
-- Run `pip install -r requirements.txt` again
-- Check that `PYTHONPATH` includes project root
-
-## Data Flows
-
-### Demand Pipeline
-
-```
-Database (P1038_visites)
-    ↓
-[Load new visits since last_loaded_date]
-    ↓
-Transform (region aggregation)
-    ↓
-Save to incremental CSV files
-    ↓
-Combine with previous finals
-    ↓
-Save to final CSV files (demanda_CAT.csv, demanda_RS.csv, demanda_UP.csv)
-    ↓
-Update state file with last_loaded_date
-```
-
-### Diagnosis Pipeline
-
-```
-Database (P1038_visites)
-    ↓
-[Load new visits since last_loaded_date]
-    ↓
-Filter by diagnosis codes (from selected_codes.csv)
-    ↓
-Transform (region aggregation)
-    ↓
-Save to incremental CSV files
-    ↓
-Combine with previous finals
-    ↓
-Save to final CSV files (selected_CAT.csv, selected_RS.csv, selected_UP.csv)
-    ↓
-Update state file with last_loaded_date
-```
-
-## Performance Considerations
-
-- **Batch Processing by Year**: Data is processed in yearly batches to manage memory usage
-- **Incremental Updates**: Only new data is processed on each run
-- **State Tracking**: Prevents reprocessing of historical data
-
-## Maintenance
-
-### Updating Dependencies
+També es poden passar carpetes alternatives:
 
 ```bash
-pip install --upgrade pip
-pip install -r requirements.txt --upgrade
-pip freeze > requirements.txt
+python run_pipeline.py --sample --all --sample-input-dir data/sample/input --sample-output-dir data/sample/output
 ```
 
-### Archiving Old Data
+## Components principals
+
+### `config/config.py`
+
+Centralitza servidor, base de dades, noms de taules, columnes, rutes de dades i fitxer `UPperRS.xlsx`.
+
+### `pipelines/shared/db.py`
+
+Construeix la connexio `pyodbc` amb ODBC Driver 18 i autenticacio `ActiveDirectoryIntegrated`.
+
+### `pipelines/shared/utils.py`
+
+Conte utilitats comunes: lectura de rangs de dates, particio per anys, consultes SQL per finestres temporals i funcions legacy de CSV/estat.
+
+### `pipelines/shared/parquet_storage.py`
+
+Gestiona incrementals Parquet, metadades, retencio de fitxers antics i escriptura de sortides finals.
+
+### `pipelines/demand/`
+
+Processa visites:
+
+- Converteix `DATA_VISITA` a dia.
+- Normalitza `UP`.
+- Afegeix `RS` a partir de l'Excel `UPperRS.xlsx`.
+- Classifica tipus de visita en presencial, domiciliaria, telefonica o `NA`.
+- Agrega comptatges per dia i per dimensions com lloc, situacio, servei i tipus.
+
+### `pipelines/diagnosis/`
+
+Processa diagnostics:
+
+- Valida que la taula origen tingui les columnes requerides.
+- Filtra codis si existeix `data/diagnosis_pipeline/selected_codes/selected_codes.csv`.
+- Converteix la data de visita a `timestamp` diari.
+- Afegeix `RS` a partir de l'Excel `UPperRS.xlsx`.
+- Genera comptatges per codi diagnostic, RS i UP.
+
+### `pipelines/shared/final_joiner.py`
+
+Uneix `demand_final.parquet` i `diagnosis_final.parquet` per `timestamp`, afegeix prefixos `DEMAND_` i `DIAGNOSIS_`, i desa el resultat final.
+
+## Validacio rapida
+
+Aquestes comprovacions no requereixen connexio a la base de dades:
 
 ```bash
-# Archive incremental files older than 1 year
-find data/demand_pipeline/incremental -type f -mtime +365 -move archive/
+python run_pipeline.py --help
+python run_pipeline.py --sample --all
+python -m compileall -q run_pipeline.py run_pipeline_optimized.py config pipelines validate_project.py check_columns.py
 ```
 
-## Support and Issues
+Per executar els pipelines reals cal tenir `.env`, ODBC i permisos de base de dades configurats.
 
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review log files in `data/{pipeline}_pipeline/state/`
-3. Verify configuration in `config/config.py`
-4. Check database connectivity and permissions
+## Notes de manteniment
 
-## License
+- `src/` es codi legacy amb rutes absolutes antigues i duplicacio de logica. No es la via recomanada.
+- `check_columns.py` encara importa configuracio legacy de `src/diagnosis`. Es pot migrar a `config/config.py` o eliminar si ja no es fa servir.
+- `src/daily_run.py` conte errors de runtime evidents (`df.combined`, `df_copmbined`, `args.run_now`) i rutes absolutes antigues. No s'hauria d'usar sense refactor.
+- `data/` conte sortides generades i actualment esta versionat. Si les dades son grans, sensibles o reproduibles, convindria treure-les del control de versions i ignorar `data/`.
+- Hi ha dues convencions de nom per l'Excel de mapping: `UPperRS.xlsx` i `UP per RS.xlsx`. La configuracio actual utilitza `UPperRS.xlsx`; millor mantenir una sola copia canonica.
+- L'agregacio optimitzada fusiona els incrementals nous amb el Parquet final existent abans de sobreescriure'l. Tot i aixo, si canvieu l'esquema de columnes, valideu que el final conservi totes les variables esperades per dia.
 
-[Add your license here]
+## Fitxers que es podrien simplificar
 
-## Contributors
+Prioritat alta:
 
-- [Your name/team]
+- Consolidar el codi actiu a `pipelines/` i arxivar o eliminar `src/` quan s'hagi validat que ja no cal.
+- Decidir si `data/` s'ha de versionar. En molts projectes de pipelines es millor versionar codi i configuracio, no sortides generades.
+- Deixar un sol fitxer de mapping UP-RS.
 
-## Changelog
+Prioritat mitjana:
 
-### v2.0 (Current)
-- Refactored project structure for better organization
-- Centralized configuration management
-- Separated pipeline modules
-- Created shared utilities module
-- Added comprehensive documentation
-
-### v1.0 (Legacy - in src/ directory)
-- Initial pipeline implementation
+- Unificar documentacio dispersa (`QUICKSTART.md`, `PROJECT_STRUCTURE.md`, `MIGRATION.md`, `OPTIMIZED_PIPELINE.md`, etc.) o marcar clarament quina documentacio es historica.
+- Fer que `check_columns.py` reutilitzi la configuracio central.
+- Afegir tests petits per transformacions i agregacions abans de tocar l'esquema de sortida.

@@ -194,10 +194,15 @@ class ParquetFinalStore:
             index_col: Name for timestamp index column
             compression: Compression algorithm (snappy, gzip, etc.)
         """
-        # Reset index if needed
-        if df.index.name is None and index_col == "timestamp":
-            df = df.reset_index()
+        df = df.copy()
+
+        # Reset index only when the timestamp is actually stored in the index.
+        if index_col in df.columns:
+            df = df.reset_index(drop=True)
         elif isinstance(df.index, pd.DatetimeIndex):
+            df.index.name = index_col
+            df = df.reset_index()
+        elif df.index.name is not None:
             df = df.reset_index()
 
         # Optimize dtypes before saving

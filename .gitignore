@@ -48,6 +48,7 @@ env/
 
 # Data directories (optional - uncomment to ignore data/)
 # data/
+data/sample/output/
 
 # Logs
 *.log
