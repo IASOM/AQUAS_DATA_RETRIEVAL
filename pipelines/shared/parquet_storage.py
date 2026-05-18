@@ -65,6 +65,9 @@ class ParquetIncrementalManager:
                 self.output_dir
                 / f"incremental_{pd.Timestamp.now():%Y%m%d_%H%M%S}_{i:03d}.parquet"
             )
+
+
+            
             chunk.to_parquet(chunk_path, compression="snappy", index=False)
             logger.info(f"Saved chunk: {chunk_path.name} ({len(chunk)} rows)")
 
