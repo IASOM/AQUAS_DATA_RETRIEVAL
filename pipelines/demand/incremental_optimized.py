@@ -10,8 +10,8 @@ from .aggregation_optimized import (
     build_daily_total_cat_optimized,
     build_daily_features_global_optimized,
     build_daily_features_by_group_optimized,
-    add_incremental_optimized,
     aggregate_final_optimized,
+    _build_wide_final_by_timestamp,
 )
 from .transformations import prepare_visits_chunk
 
@@ -54,7 +54,7 @@ def run_incremental_pipeline_optimized(
     incremental_mgr = ParquetIncrementalManager(
         incremental_dir,
         retention_days=retention_days,
-        chunk_size=50000,
+        chunk_size=10000,
     )
     final_store = ParquetFinalStore(final_file)
 
@@ -136,11 +136,24 @@ def run_incremental_pipeline_optimized(
                 df_chunk, group_col="UP"
             )
 
-            # Add to incremental storage
-            add_incremental_optimized(cat_daily.reset_index(), incremental_mgr)
-            add_incremental_optimized(global_daily, incremental_mgr)
-            add_incremental_optimized(rs_daily, incremental_mgr)
-            add_incremental_optimized(up_daily, incremental_mgr)
+            # Store one already-aggregated daily file per processed year.
+            yearly_daily = _build_wide_final_by_timestamp(
+                pd.concat(
+                    [
+                        cat_daily.reset_index(),
+                        global_daily,
+                        rs_daily,
+                        up_daily,
+                    ],
+                    ignore_index=True,
+                    sort=False,
+                )
+            )
+            incremental_mgr.add_data(yearly_daily, timestamp_col="timestamp")
+            logger.info(
+                f"Saved demand year {year} daily aggregate "
+                f"({len(yearly_daily)} rows)"
+            )
 
             # Track max date
             chunk_max = df_chunk["timestamp"].max()
@@ -149,7 +162,7 @@ def run_incremental_pipeline_optimized(
                     global_max_loaded = chunk_max
 
             # Clean up
-            del df_chunk, cat_daily, global_daily, rs_daily, up_daily
+            del df_chunk, cat_daily, global_daily, rs_daily, up_daily, yearly_daily
 
         # Aggregate to final
         logger.info("Aggregating to final output...")

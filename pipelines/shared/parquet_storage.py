@@ -84,7 +84,7 @@ class ParquetIncrementalManager:
 
     def load_all_incremental(self, timestamp_col: str = "timestamp") -> pd.DataFrame:
         """Load and concatenate all current incremental files efficiently."""
-        parquet_files = sorted(self.output_dir.glob("incremental_*.parquet"))
+        parquet_files = self.iter_incremental_files()
 
         if not parquet_files:
             logger.warning("No incremental files found")
@@ -110,6 +110,25 @@ class ParquetIncrementalManager:
         result = result.sort_values(timestamp_col)
 
         return result
+
+    def iter_incremental_files(self) -> list[Path]:
+        """Return current incremental parquet files in deterministic order."""
+        return sorted(self.output_dir.glob("incremental_*.parquet"))
+
+    def clear_incremental_files(self) -> int:
+        """Remove processed incremental parquet chunks, keeping metadata."""
+        removed = 0
+        for pf in self.iter_incremental_files():
+            try:
+                pf.unlink()
+                removed += 1
+            except Exception as e:
+                logger.warning(f"Could not remove incremental file {pf}: {e}")
+
+        if removed:
+            logger.info(f"Removed {removed} processed incremental parquet files")
+
+        return removed
 
     def _cleanup_retention(self, timestamp_col: str) -> None:
         """Remove incremental files older than retention period."""
