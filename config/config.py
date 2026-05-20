@@ -8,6 +8,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 
 class Config:
     """Base configuration class."""
@@ -21,6 +28,13 @@ class Config:
     BASE_DIR = Path(os.getenv("BASE_DIR", Path.cwd()))
     DATA_DIR = BASE_DIR / "data"
     CONFIG_DIR = BASE_DIR / "config"
+    SELECTIONS_DIR = BASE_DIR / "selections"
+    SELECTED_RS_FILE = Path(
+        os.getenv("SELECTED_RS_FILE", SELECTIONS_DIR / "selected_rs.csv")
+    )
+    SELECTED_UP_FILE = Path(
+        os.getenv("SELECTED_UP_FILE", SELECTIONS_DIR / "selected_up.csv")
+    )
 
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -36,6 +50,8 @@ class DemandConfig(Config):
     # Data paths
     PIPELINE_DATA_DIR = Config.DATA_DIR / "demand_pipeline"
     STATE_FILE = PIPELINE_DATA_DIR / "state" / "state.json"
+    SELECTED_RS_FILE = Config.SELECTED_RS_FILE
+    SELECTED_UP_FILE = Config.SELECTED_UP_FILE
 
     OUTPUT_CAT_FILE = PIPELINE_DATA_DIR / "incremental" / "demanda_CAT_incremental.csv"
     OUTPUT_RS_FILE = PIPELINE_DATA_DIR / "incremental" / "demanda_RS_incremental.csv"
@@ -73,7 +89,17 @@ class DiagnosisConfig(Config):
     # Data paths
     PIPELINE_DATA_DIR = Config.DATA_DIR / "diagnosis_pipeline"
     STATE_FILE = PIPELINE_DATA_DIR / "state" / "state.json"
-    SELECTED_CODES_FILE = PIPELINE_DATA_DIR / "selected_codes" / "selected_codes.csv"
+    SELECTED_CODES_FILE = Path(
+        os.getenv(
+            "SELECTED_DIAGNOSIS_CODES_FILE",
+            os.getenv(
+                "SELECTED_CODES_FILE",
+                Config.SELECTIONS_DIR / "selected_diagnosis_codes.csv",
+            ),
+        )
+    )
+    SELECTED_RS_FILE = Config.SELECTED_RS_FILE
+    SELECTED_UP_FILE = Config.SELECTED_UP_FILE
 
     OUTPUT_CAT_FILE = PIPELINE_DATA_DIR / "incremental" / "selected_CAT_incremental.csv"
     OUTPUT_RS_FILE = PIPELINE_DATA_DIR / "incremental" / "selected_RS_incremental.csv"

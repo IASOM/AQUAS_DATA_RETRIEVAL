@@ -57,6 +57,10 @@ diagnosis_pipeline/
 *.pickle
 *.feather
 
+# Keep lightweight selection templates in Git.
+!selections/
+!selections/*.csv
+
 # Database files
 *.db
 *.sqlite

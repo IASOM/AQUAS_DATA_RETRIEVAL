@@ -11,6 +11,7 @@ mkdir -p data/diagnosis_pipeline/state
 mkdir -p data/diagnosis_pipeline/incremental
 mkdir -p data/diagnosis_pipeline/finals
 mkdir -p data/diagnosis_pipeline/selected_codes
+mkdir -p selections
 
 echo ""
 echo "Project directories created successfully!"
