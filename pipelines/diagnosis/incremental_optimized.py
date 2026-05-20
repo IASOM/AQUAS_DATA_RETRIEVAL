@@ -1,4 +1,4 @@
-"""Optimized diagnosis pipeline main runner with Parquet storage."""
+﻿"""Optimized diagnosis pipeline main runner with Parquet storage."""
 import pandas as pd
 import logging
 from pathlib import Path
@@ -242,7 +242,7 @@ def run_incremental_diagnosis_pipeline_optimized(
             add_incremental_diagnosis_optimized(rs_daily, incremental_mgr)
             add_incremental_diagnosis_optimized(up_daily, incremental_mgr)
             add_incremental_diagnosis_optimized(
-                wide_format.reset_index(), incremental_mgr
+                wide_format.reset_index(drop=True), incremental_mgr
             )
 
             # Track max date
@@ -282,3 +282,4 @@ def run_diagnosis_pipeline_main_optimized(config) -> None:
         min_valid_date=config.MIN_VALID_DATE,
         retention_days=None,
     )
+
