@@ -1,5 +1,6 @@
 """Optimized diagnosis pipeline with Parquet storage and partial incremental files."""
 import hashlib
+import os
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
+MAX_DIAGNOSIS_FEATURES = int(os.getenv("MAX_DIAGNOSIS_FEATURES", "200000"))
 
 
 def build_daily_diagnosis_counts_optimized(
@@ -111,6 +113,45 @@ def build_daily_total_general_optimized(
     result.columns = ["DIAG_TOTAL"]
 
     return result
+
+
+def build_daily_total_by_group_optimized(
+    df: pd.DataFrame,
+    group_col: str,
+    group_label: str,
+    date_column: str = "timestamp",
+    value_col: str = "n",
+) -> pd.DataFrame:
+    """
+    Build daily diagnosis totals by group using all diagnosis rows.
+
+    This is intentionally independent from selected diagnosis-code filters, so
+    RS/UP totals remain true totals while code-specific features can stay small.
+    """
+    df = df.copy()
+    df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")
+    df[group_col] = df[group_col].fillna("UNKNOWN").astype(str)
+
+    grouped = (
+        df.groupby([date_column, group_col], as_index=False, observed=True)[value_col]
+        .sum()
+    )
+    grouped["feature"] = f"DIAG_TOTAL_{group_label}_" + grouped[group_col].astype(str)
+    _validate_feature_count(
+        grouped["feature"].nunique(),
+        f"diagnosis total {group_label} features",
+    )
+
+    wide = grouped.pivot_table(
+        index=date_column,
+        columns="feature",
+        values=value_col,
+        aggfunc="sum",
+        fill_value=0,
+        observed=True,
+    )
+    wide.index.name = date_column
+    return wide.reset_index()
 
 
 def build_diagnosis_wide_format_optimized(
@@ -311,7 +352,11 @@ def _build_diagnosis_wide_final(
     wide_cols = [
         col
         for col in out.columns
-        if col == "DIAG_TOTAL" or col.startswith("DIAG_CODE_")
+        if (
+            col == "DIAG_TOTAL"
+            or col.startswith("DIAG_TOTAL_")
+            or col.startswith("DIAG_CODE_")
+        )
     ]
     if wide_cols:
         frames.append(_sum_numeric_by_timestamp(out, wide_cols, timestamp_col))
@@ -363,6 +408,7 @@ def _sum_numeric_by_timestamp(
     value_cols: list[str],
     timestamp_col: str,
 ) -> pd.DataFrame:
+    _validate_feature_count(len(value_cols), "wide diagnosis columns")
     out = df[[timestamp_col, *value_cols]].copy()
     out[value_cols] = out[value_cols].apply(pd.to_numeric, errors="coerce")
     return (
@@ -382,6 +428,7 @@ def _pivot_diagnosis_long(
     out = df[[timestamp_col, code_col, value_col]].dropna(subset=[code_col]).copy()
     out[value_col] = pd.to_numeric(out[value_col], errors="coerce").fillna(0)
     out["feature"] = prefix + "_" + out[code_col].astype(str)
+    _validate_feature_count(out["feature"].nunique(), "diagnosis code features")
 
     wide = out.pivot_table(
         index=timestamp_col,
@@ -411,6 +458,7 @@ def _pivot_diagnosis_group(
         + "_"
         + out[group_col].astype(str)
     )
+    _validate_feature_count(out["feature"].nunique(), f"diagnosis {label} features")
 
     wide = out.pivot_table(
         index=timestamp_col,
@@ -422,6 +470,19 @@ def _pivot_diagnosis_group(
     )
     wide.index.name = timestamp_col
     return wide.reset_index()
+
+
+def _validate_feature_count(feature_count: int, context: str) -> None:
+    """Fail before pandas tries to allocate an impossibly wide matrix."""
+    if feature_count <= MAX_DIAGNOSIS_FEATURES:
+        return
+
+    raise ValueError(
+        f"Refusing to build {feature_count:,} {context}. "
+        f"This usually means the selected diagnosis-code filter was not loaded "
+        f"or the diagnosis code column is not normalized. "
+        f"Set MAX_DIAGNOSIS_FEATURES to override if this is intentional."
+    )
 
 
 def _merge_with_existing_diagnosis_final(

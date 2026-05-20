@@ -18,6 +18,7 @@ def setup_project():
         "data/diagnosis_pipeline/incremental",
         "data/diagnosis_pipeline/finals",
         "data/diagnosis_pipeline/selected_codes",
+        "selections",
     ]
     
     for dir_path in data_dirs:

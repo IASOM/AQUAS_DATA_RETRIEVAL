@@ -12,6 +12,7 @@ mkdir data\diagnosis_pipeline\state 2>nul
 mkdir data\diagnosis_pipeline\incremental 2>nul
 mkdir data\diagnosis_pipeline\finals 2>nul
 mkdir data\diagnosis_pipeline\selected_codes 2>nul
+mkdir selections 2>nul
 
 echo.
 echo Project directories created successfully!

@@ -9,7 +9,8 @@ from pipelines.shared.parquet_storage import ParquetIncrementalManager, ParquetF
 from .aggregation_optimized import (
     build_daily_diagnosis_counts_optimized,
     build_daily_diagnosis_by_group_optimized,
-    build_diagnosis_wide_format_optimized,
+    build_daily_total_by_group_optimized,
+    build_daily_total_general_optimized,
     aggregate_diagnosis_final_optimized,
     _build_diagnosis_wide_final,
 )
@@ -51,33 +52,165 @@ def get_diagnosis_data_for_year_optimized(
     year_end: pd.Timestamp,
     last_loaded_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
-    """Optimized query for diagnosis data."""
-    selected_cols = [date_column, up_column, diag_code_column]
-    cols_sql = ", ".join(f"[{c}]" for c in selected_cols)
+    """Query diagnosis data already aggregated by day, UP, and code prefix."""
+    date_expr = f"CAST([{date_column}] AS date)"
+    code_expr = (
+        f"UPPER(LEFT(LTRIM(RTRIM(CAST([{diag_code_column}] AS VARCHAR(50)))), 3))"
+    )
 
     if last_loaded_date is None:
         query = f"""
-        SELECT {cols_sql}
+        SELECT
+            {date_expr} AS [timestamp],
+            [{up_column}] AS [{up_column}],
+            {code_expr} AS [DIAG_CODE],
+            COUNT_BIG(*) AS [n]
         FROM [{schema}].[{table_name}]
         WHERE [{date_column}] >= ?
             AND [{date_column}] < ?
             AND [{diag_code_column}] IS NOT NULL
-        ORDER BY [{date_column}] ASC
+        GROUP BY {date_expr}, [{up_column}], {code_expr}
+        ORDER BY [timestamp] ASC
         """
         params = [year_start, year_end]
     else:
         query = f"""
-        SELECT {cols_sql}
+        SELECT
+            {date_expr} AS [timestamp],
+            [{up_column}] AS [{up_column}],
+            {code_expr} AS [DIAG_CODE],
+            COUNT_BIG(*) AS [n]
         FROM [{schema}].[{table_name}]
         WHERE [{date_column}] >= ?
             AND [{date_column}] < ?
             AND [{date_column}] > ?
             AND [{diag_code_column}] IS NOT NULL
-        ORDER BY [{date_column}] ASC
+        GROUP BY {date_expr}, [{up_column}], {code_expr}
+        ORDER BY [timestamp] ASC
         """
         params = [year_start, year_end, last_loaded_date]
 
     return pd.read_sql_query(query, conn, params=params)
+
+
+def _normalize_diag_codes(values: pd.Series) -> pd.Series:
+    """Normalize diagnosis values to the ICD10 3-character code used by filters."""
+    return values.astype("string").str.strip().str.upper().str[:3]
+
+
+def _normalize_up_codes(values: pd.Series) -> pd.Series:
+    """Normalize UP codes so they match the Excel mapping."""
+    return values.astype("string").str.strip().str.zfill(5)
+
+
+def _normalize_rs_values(values: pd.Series) -> pd.Series:
+    """Normalize RS labels for stable matching against selected RS files."""
+    return values.astype("string").str.strip().str.upper()
+
+
+def _load_selection_values(
+    selection_file: Optional[str | Path],
+    filename: str,
+    label: str,
+    normalizer,
+    legacy_filename: Optional[str] = None,
+    legacy_subdir: Optional[str] = None,
+) -> Optional[set[str]]:
+    """Load a one-column selection CSV from the shared selections folder."""
+    candidates = []
+    if selection_file:
+        active_path = Path(selection_file)
+        candidates.append(active_path)
+        resolved = active_path.resolve()
+        for parent_index in (1, 3):
+            try:
+                base_dir = resolved.parents[parent_index]
+            except IndexError:
+                continue
+            candidates.append(base_dir / "selections" / filename)
+            if legacy_subdir and legacy_filename:
+                candidates.append(
+                    base_dir / "diagnosis_pipeline" / legacy_subdir / legacy_filename
+                )
+
+    candidates.append(Path.cwd() / "selections" / filename)
+    if legacy_subdir and legacy_filename:
+        candidates.append(Path.cwd() / "diagnosis_pipeline" / legacy_subdir / legacy_filename)
+
+    seen = set()
+    found_file = False
+    for path in candidates:
+        path = Path(path)
+        path_key = path.resolve()
+        if path_key in seen:
+            continue
+        seen.add(path_key)
+
+        if not path.exists():
+            continue
+
+        found_file = True
+        selection_df = pd.read_csv(path)
+        values = set(normalizer(selection_df.iloc[:, 0]).dropna())
+        values.discard("")
+        if not values:
+            logger.warning(f"Selected {label} file is empty: {path}")
+            continue
+
+        logger.info(f"Loaded {len(values)} selected {label} from {path}")
+        return values
+
+    if found_file:
+        logger.info(f"No selected {label} configured in selections/{filename}.")
+    else:
+        logger.warning(
+            f"No selected {label} file found. Expected "
+            f"selections/{filename}."
+        )
+    return None
+
+
+def _load_selected_codes(selected_codes_file: Optional[str | Path]) -> Optional[set[str]]:
+    """Load selected diagnosis-code prefixes."""
+    return _load_selection_values(
+        selection_file=selected_codes_file,
+        filename="selected_diagnosis_codes.csv",
+        label="diagnosis codes",
+        normalizer=_normalize_diag_codes,
+        legacy_filename="selected_codes.csv",
+        legacy_subdir="selected_codes",
+    )
+
+
+def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[str]]:
+    """Load selected RS labels."""
+    return _load_selection_values(
+        selection_file=selected_rs_file,
+        filename="selected_rs.csv",
+        label="RS values",
+        normalizer=_normalize_rs_values,
+    )
+
+
+def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[set[str]]:
+    """Load selected UP codes."""
+    return _load_selection_values(
+        selection_file=selected_up_file,
+        filename="selected_up.csv",
+        label="UP values",
+        normalizer=_normalize_up_codes,
+    )
+
+
+def _filter_if_selected(
+    df: pd.DataFrame,
+    column: str,
+    selected_values: Optional[set[str]],
+) -> pd.DataFrame:
+    """Filter a dataframe only when a selection file was provided."""
+    if selected_values is None:
+        return df
+    return df[df[column].isin(selected_values)].copy()
 
 
 def run_incremental_diagnosis_pipeline_optimized(
@@ -92,6 +225,8 @@ def run_incremental_diagnosis_pipeline_optimized(
     incremental_dir: str | Path,
     final_file: str | Path,
     selected_codes_file: Optional[str | Path] = None,
+    selected_rs_file: Optional[str | Path] = None,
+    selected_up_file: Optional[str | Path] = None,
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
     retention_days: Optional[int] = None,
@@ -111,6 +246,8 @@ def run_incremental_diagnosis_pipeline_optimized(
         incremental_dir: Directory for incremental parquet files
         final_file: Final output parquet file
         selected_codes_file: Optional file with selected diagnosis codes to filter
+        selected_rs_file: Optional file with selected RS values for grouped outputs
+        selected_up_file: Optional file with selected UP values for grouped outputs
         auth_mode: Database authentication mode
         min_valid_date: Minimum date to process
         retention_days: Days of incremental data to keep. None keeps all history,
@@ -126,15 +263,9 @@ def run_incremental_diagnosis_pipeline_optimized(
     )
     final_store = ParquetFinalStore(final_file)
 
-    # Load selected codes if provided
-    selected_codes = None
-    if selected_codes_file and Path(selected_codes_file).exists():
-        try:
-            selected_codes_df = pd.read_csv(selected_codes_file)
-            selected_codes = set(selected_codes_df.iloc[:, 0].unique())
-            logger.info(f"Loaded {len(selected_codes)} selected diagnosis codes")
-        except Exception as e:
-            logger.warning(f"Could not load selected codes: {e}")
+    selected_codes = _load_selected_codes(selected_codes_file)
+    selected_rs = _load_selected_rs(selected_rs_file)
+    selected_up = _load_selected_up(selected_up_file)
 
     # Get last processed date
     last_loaded_date = incremental_mgr.get_last_timestamp()
@@ -199,23 +330,23 @@ def run_incremental_diagnosis_pipeline_optimized(
 
             logger.info(f"Year {year}: {len(df_chunk)} rows")
 
-            # Filter by selected codes if provided
-            if selected_codes:
-                before = len(df_chunk)
-                df_chunk = df_chunk[df_chunk[diag_code_column].isin(selected_codes)]
-                after = len(df_chunk)
-                logger.info(f"Filtered to {after} rows (from {before})")
+            df_chunk["DIAG_CODE"] = _normalize_diag_codes(df_chunk["DIAG_CODE"])
+            df_chunk = df_chunk.dropna(subset=["DIAG_CODE"])
+            df_chunk = df_chunk[df_chunk["DIAG_CODE"] != ""]
 
             if df_chunk.empty:
                 continue
 
             # Prepare data
-            df_chunk["timestamp"] = pd.to_datetime(df_chunk[date_column]).dt.floor("D")
-            df_chunk["n"] = 1
-            df_chunk.rename(columns={diag_code_column: "DIAG_CODE"}, inplace=True)
+            df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"]).dt.floor("D")
+            df_chunk = df_chunk.dropna(subset=["timestamp"])
+            df_chunk[up_column] = _normalize_up_codes(df_chunk[up_column])
+            df_chunk["n"] = pd.to_numeric(df_chunk["n"], errors="coerce").fillna(0)
 
             # Add UP-RS mapping
             up_rs_map = up_rs[["Codi UP", "RS"]].copy()
+            up_rs_map["Codi UP"] = _normalize_up_codes(up_rs_map["Codi UP"])
+            up_rs_map["RS"] = _normalize_rs_values(up_rs_map["RS"])
             up_rs_map.columns = [up_column, "RS"]
             before_merge = len(df_chunk)
             df_chunk = df_chunk.merge(
@@ -228,23 +359,51 @@ def run_incremental_diagnosis_pipeline_optimized(
                 logger.warning(f"Unknown UP codes: {list(unknown_ups)[:10]}...")  # Show first 10
 
             # Build aggregations efficiently
-            total_daily = build_daily_diagnosis_counts_optimized(df_chunk)
+            general_total = build_daily_total_general_optimized(df_chunk).reset_index()
+            rs_total = build_daily_total_by_group_optimized(
+                _filter_if_selected(df_chunk, "RS", selected_rs),
+                group_col="RS",
+                group_label="RS",
+            )
+            up_total = build_daily_total_by_group_optimized(
+                _filter_if_selected(df_chunk, up_column, selected_up),
+                group_col=up_column,
+                group_label="UP",
+            )
+
+            if selected_codes:
+                code_df = df_chunk[df_chunk["DIAG_CODE"].isin(selected_codes)].copy()
+                logger.info(
+                    f"Selected diagnosis-code rows for year {year}: "
+                    f"{len(code_df)} of {len(df_chunk)} aggregated rows"
+                )
+            else:
+                code_df = df_chunk.iloc[0:0].copy()
+                logger.warning(
+                    "Skipping code-specific diagnosis features because no selected "
+                    "diagnosis-code file was found"
+                )
+
+            code_daily = build_daily_diagnosis_counts_optimized(code_df)
             rs_daily = build_daily_diagnosis_by_group_optimized(
-                df_chunk, group_col="RS"
+                _filter_if_selected(code_df, "RS", selected_rs),
+                group_col="RS",
             )
             up_daily = build_daily_diagnosis_by_group_optimized(
-                df_chunk, group_col=up_column
+                _filter_if_selected(code_df, up_column, selected_up),
+                group_col=up_column,
             )
-            wide_format = build_diagnosis_wide_format_optimized(df_chunk)
 
             # Store one already-aggregated daily file per processed year.
             yearly_daily = _build_diagnosis_wide_final(
                 pd.concat(
                     [
-                        total_daily,
+                        general_total,
+                        rs_total,
+                        up_total,
+                        code_daily,
                         rs_daily,
                         up_daily,
-                        wide_format.reset_index(drop=True),
                     ],
                     ignore_index=True,
                     sort=False,
@@ -263,7 +422,17 @@ def run_incremental_diagnosis_pipeline_optimized(
                     global_max_loaded = chunk_max
 
             # Clean up
-            del df_chunk, total_daily, rs_daily, up_daily, wide_format, yearly_daily
+            del (
+                df_chunk,
+                general_total,
+                rs_total,
+                up_total,
+                code_df,
+                code_daily,
+                rs_daily,
+                up_daily,
+                yearly_daily,
+            )
 
         # Aggregate to final
         logger.info("Aggregating diagnosis to final output...")
@@ -288,7 +457,9 @@ def run_diagnosis_pipeline_main_optimized(config) -> None:
         up_rs=pd.read_excel(config.UP_RS_FILE, sheet_name=config.UP_RS_SHEET),
         incremental_dir=config.PIPELINE_DATA_DIR / "incremental",
         final_file=config.PIPELINE_DATA_DIR / "finals" / "diagnosis_final.parquet",
-        selected_codes_file=config.PIPELINE_DATA_DIR / "selected_codes" / "selected_codes.csv",
+        selected_codes_file=config.SELECTED_CODES_FILE,
+        selected_rs_file=config.SELECTED_RS_FILE,
+        selected_up_file=config.SELECTED_UP_FILE,
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
         retention_days=None,

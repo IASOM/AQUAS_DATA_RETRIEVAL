@@ -18,6 +18,106 @@ from .transformations import prepare_visits_chunk
 logger = setup_logging()
 
 
+def _normalize_up_codes(values: pd.Series) -> pd.Series:
+    """Normalize UP codes for matching selected UP files."""
+    return values.astype("string").str.strip().str.zfill(5)
+
+
+def _normalize_rs_values(values: pd.Series) -> pd.Series:
+    """Normalize RS labels for matching selected RS files."""
+    return values.astype("string").str.strip().str.upper()
+
+
+def _load_selection_values(
+    selection_file: Optional[str | Path],
+    filename: str,
+    label: str,
+    normalizer,
+) -> Optional[set[str]]:
+    """Load a one-column shared selection CSV."""
+    candidates = []
+    if selection_file:
+        active_path = Path(selection_file)
+        candidates.append(active_path)
+        try:
+            base_dir = active_path.resolve().parents[1]
+            candidates.append(base_dir / "selections" / filename)
+        except IndexError:
+            pass
+
+    candidates.append(Path.cwd() / "selections" / filename)
+
+    seen = set()
+    found_file = False
+    for path in candidates:
+        path = Path(path)
+        path_key = path.resolve()
+        if path_key in seen:
+            continue
+        seen.add(path_key)
+
+        if not path.exists():
+            continue
+
+        found_file = True
+        selection_df = pd.read_csv(path)
+        values = set(normalizer(selection_df.iloc[:, 0]).dropna())
+        values.discard("")
+        if not values:
+            logger.warning(f"Selected demand {label} file is empty: {path}")
+            continue
+
+        logger.info(f"Loaded {len(values)} selected demand {label} from {path}")
+        return values
+
+    if found_file:
+        logger.info(
+            f"No selected demand {label} configured; all values will be included "
+            "for this grouped output."
+        )
+    else:
+        logger.warning(
+            f"No selected demand {label} file found. Expected "
+            f"selections/{filename}. "
+            "All values will be included for this grouped output."
+        )
+    return None
+
+
+def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[str]]:
+    """Load selected RS labels for demand grouped outputs."""
+    return _load_selection_values(
+        selection_file=selected_rs_file,
+        filename="selected_rs.csv",
+        label="RS values",
+        normalizer=_normalize_rs_values,
+    )
+
+
+def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[set[str]]:
+    """Load selected UP codes for demand grouped outputs."""
+    return _load_selection_values(
+        selection_file=selected_up_file,
+        filename="selected_up.csv",
+        label="UP values",
+        normalizer=_normalize_up_codes,
+    )
+
+
+def _filter_if_selected(
+    df: pd.DataFrame,
+    column: str,
+    selected_values: Optional[set[str]],
+    normalizer,
+) -> pd.DataFrame:
+    """Filter a dataframe only when a selection file contains values."""
+    if selected_values is None:
+        return df
+
+    normalized = normalizer(df[column])
+    return df[normalized.isin(selected_values)].copy()
+
+
 def run_incremental_pipeline_optimized(
     db_server: str,
     db_database: str,
@@ -27,6 +127,8 @@ def run_incremental_pipeline_optimized(
     up_rs: pd.DataFrame,
     incremental_dir: str | Path,
     final_file: str | Path,
+    selected_rs_file: Optional[str | Path] = None,
+    selected_up_file: Optional[str | Path] = None,
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
     retention_days: Optional[int] = None,
@@ -43,6 +145,8 @@ def run_incremental_pipeline_optimized(
         up_rs: UP-RS mapping DataFrame
         incremental_dir: Directory for incremental parquet files
         final_file: Final output parquet file
+        selected_rs_file: Optional file with selected RS values for grouped outputs
+        selected_up_file: Optional file with selected UP values for grouped outputs
         auth_mode: Database authentication mode
         min_valid_date: Minimum date to process
         retention_days: Days of incremental data to keep. None keeps all history,
@@ -57,6 +161,8 @@ def run_incremental_pipeline_optimized(
         chunk_size=10000,
     )
     final_store = ParquetFinalStore(final_file)
+    selected_rs = _load_selected_rs(selected_rs_file)
+    selected_up = _load_selected_up(selected_up_file)
 
     # Get last processed date
     last_loaded_date = incremental_mgr.get_last_timestamp()
@@ -130,10 +236,12 @@ def run_incremental_pipeline_optimized(
             cat_daily = build_daily_total_cat_optimized(df_chunk)
             global_daily = build_daily_features_global_optimized(df_chunk)
             rs_daily = build_daily_features_by_group_optimized(
-                df_chunk, group_col="RS"
+                _filter_if_selected(df_chunk, "RS", selected_rs, _normalize_rs_values),
+                group_col="RS",
             )
             up_daily = build_daily_features_by_group_optimized(
-                df_chunk, group_col="UP"
+                _filter_if_selected(df_chunk, "UP", selected_up, _normalize_up_codes),
+                group_col="UP",
             )
 
             # Store one already-aggregated daily file per processed year.
@@ -185,6 +293,8 @@ def run_demand_pipeline_main_optimized(config) -> None:
         up_rs=pd.read_excel(config.UP_RS_FILE, sheet_name=config.UP_RS_SHEET),
         incremental_dir=config.PIPELINE_DATA_DIR / "incremental",
         final_file=config.PIPELINE_DATA_DIR / "finals" / "demand_final.parquet",
+        selected_rs_file=config.SELECTED_RS_FILE,
+        selected_up_file=config.SELECTED_UP_FILE,
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
         retention_days=None,

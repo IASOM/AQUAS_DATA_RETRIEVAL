@@ -17,7 +17,7 @@ El codi implementa dos pipelines principals:
 | Pipeline | Taula origen | Objectiu | Sortida principal |
 | --- | --- | --- | --- |
 | Demanda | `z_inv.P1038_visites` | Comptar visites per dia i generar variables agregades per Catalunya, RS i UP | `data/demand_pipeline/finals/demand_final.parquet` |
-| Diagnostics | `z_inv.P1038_prstb015r_filtrat` | Comptar diagnostics per dia, codi diagnostic, RS i UP, opcionalment filtrant per codis seleccionats | `data/diagnosis_pipeline/finals/diagnosis_final.parquet` |
+| Diagnostics | `z_inv.P1038_prstb015r_filtrat` | Comptar totals reals de diagnostics per dia i generar variables de codis seleccionats per Catalunya, RS i UP | `data/diagnosis_pipeline/finals/diagnosis_final.parquet` |
 
 TambÃ© pot unir les dues sortides finals en un sol fitxer:
 
@@ -60,7 +60,12 @@ AQUAS_INTEGRATION/
   data/
     demand_pipeline/
     diagnosis_pipeline/
+      selected_codes/
     finals/
+  selections/
+    selected_diagnosis_codes.csv
+    selected_rs.csv
+    selected_up.csv
   src/
     ... codi legacy
   run_pipeline.py
@@ -100,10 +105,82 @@ DB_DATABASE=aquas
 AUTH_MODE=ActiveDirectoryIntegrated
 BASE_DIR=C:/path/to/AQUAS_INTEGRATION
 UP_RS_FILE=C:/path/to/AQUAS_INTEGRATION/UPperRS.xlsx
+SELECTED_RS_FILE=C:/path/to/AQUAS_INTEGRATION/selections/selected_rs.csv
+SELECTED_UP_FILE=C:/path/to/AQUAS_INTEGRATION/selections/selected_up.csv
+SELECTED_DIAGNOSIS_CODES_FILE=C:/path/to/AQUAS_INTEGRATION/selections/selected_diagnosis_codes.csv
+MAX_DIAGNOSIS_FEATURES=200000
 LOG_LEVEL=INFO
 ```
 
 `UP_RS_FILE` ha d'apuntar a l'Excel amb el full `UP per RS`. El pipeline utilitza aquest fitxer per mapar codis UP a RS.
+
+### Seleccions de demanda per RS i UP
+
+El pipeline de demanda tambe pot limitar les columnes especifiques de RS i UP sense alterar els totals globals:
+
+- `DEMANDA_TOTAL` es calcula amb totes les visites.
+- Les variables globals sense RS/UP, com `demanda_SERVEI_CODI_INF`, tambe es calculen amb totes les visites.
+- `selections/selected_rs.csv` limita les columnes agrupades per RS, com `demanda_SERVEI_CODI_INF_<RS>` i `demanda__TOTAL_RS_<RS>`.
+- `selections/selected_up.csv` limita les columnes agrupades per UP, com `demanda_SERVEI_CODI_INF_<UP>` i `demanda__TOTAL_UP_<UP>`.
+
+Els CSVs son d'una sola columna:
+
+```csv
+RS
+BARCELONA
+GIRONA
+```
+
+```csv
+UP
+00001
+00025
+00103
+```
+
+Si no hi ha fitxer de RS o UP amb valors, s'inclouen totes les RS o totes les UP. Les UP es normalitzen amb zeros a l'esquerra, per exemple `1` -> `00001`. Aquests fitxers son compartits per demanda i diagnostics.
+
+### Seleccions de diagnostics, RS i UP
+
+El pipeline de diagnostics separa dos conceptes que son importants per no barrejar totals amb filtres:
+
+- Els totals `DIAG_TOTAL`, `DIAG_TOTAL_RS_*` i `DIAG_TOTAL_UP_*` es calculen amb tots els diagnostics de la taula origen.
+- Les variables de codi `DIAG_CODE_*`, `DIAG_RS_<codi>_<RS>` i `DIAG_UP_<codi>_<UP>` es calculen nomes per als codis diagnostics seleccionats.
+- Els fitxers de RS i UP no canvien el total general; nomes limiten quines columnes agrupades per RS o UP s'escriuen al Parquet final.
+
+Fitxers de seleccio:
+
+| Fitxer | Exemple de capcalera | Efecte |
+| --- | --- | --- |
+| `selections/selected_diagnosis_codes.csv` | `ICD10_3` | Llista de codis ICD10 de 3 caracters que generen variables `DIAG_CODE_*` i variables per grup. Codis com `J00.9` es normalitzen a `J00`. |
+| `selections/selected_rs.csv` | `RS` | Si existeix i conte valors, limita les columnes `DIAG_TOTAL_RS_*` i `DIAG_RS_<codi>_<RS>` a aquestes RS. Es el mateix fitxer compartit amb demanda. |
+| `selections/selected_up.csv` | `UP` | Si existeix i conte valors, limita les columnes `DIAG_TOTAL_UP_*` i `DIAG_UP_<codi>_<UP>` a aquestes UP. Es el mateix fitxer compartit amb demanda. |
+
+Cada CSV es d'una sola columna. Exemple:
+
+```csv
+ICD10_3
+J00
+I10
+A09
+```
+
+```csv
+RS
+BARCELONA
+GIRONA
+```
+
+```csv
+UP
+00001
+00025
+00103
+```
+
+Si els fitxers compartits de RS o UP no existeixen o no tenen valors, s'inclouen totes les RS o totes les UP. Per compatibilitat, els codis diagnostics encara poden carregar-se des de la ruta legacy `diagnosis_pipeline/selected_codes/selected_codes.csv`, pero la ruta recomanada es `selections/selected_diagnosis_codes.csv`. Si no hi ha fitxer de codis diagnostics amb valors, el pipeline conserva els totals pero omet les variables especifiques de codi per evitar matrius massa amples.
+
+Per protegir memoria, `MAX_DIAGNOSIS_FEATURES` limita el nombre de columnes de diagnostics que es poden crear. Si s'arriba a aquest limit, normalment vol dir que falta una seleccio o que la columna de codi diagnostic no s'ha normalitzat com s'esperava.
 
 ## Execucio
 
@@ -186,7 +263,7 @@ El projecte inclou dades petites d'exemple per provar el pipeline sense ODBC ni 
 | `data/sample/input/up_rs.csv` | Mapping UP -> RS |
 | `data/sample/input/demand_visits.csv` | Visites sintetiques per al pipeline de demanda |
 | `data/sample/input/diagnosis_visits.csv` | Diagnostics sintetics |
-| `data/sample/input/selected_codes.csv` | Codis diagnostics que es conservaran en el filtre |
+| `data/sample/input/selected_codes.csv` | Codis diagnostics que generen variables especifiques de codi |
 
 Comandes utils:
 
@@ -212,7 +289,7 @@ El script `scripts/create_multiyear_sample.py` crea una mostra sintetica mes gra
 | `data/sample/multiyear_input/up_rs.csv` | Mapping UP -> RS de prova |
 | `data/sample/multiyear_input/demand_visits.csv` | Visites sintetiques repartides per tots els dies del rang |
 | `data/sample/multiyear_input/diagnosis_visits.csv` | Diagnostics sintetics repartits per tots els dies del rang |
-| `data/sample/multiyear_input/selected_codes.csv` | Codis diagnostics inclosos en la mostra |
+| `data/sample/multiyear_input/selected_codes.csv` | Codis diagnostics que generen variables especifiques de codi |
 
 I escriu aquestes sortides finals:
 
@@ -225,7 +302,7 @@ I escriu aquestes sortides finals:
 | `data/sample/multiyear_output/finals/demand_diagnosis_joined.parquet` | Parquet | Final unit demanda + diagnostics |
 | `data/sample/multiyear_output/finals/demand_diagnosis_joined.csv` | CSV | Copia llegible del final unit |
 
-La demanda inclou tres nivells de variables: totals globals sense agrupacio (demanda_SERVEI_CODI_INF, demanda_TIPUS_CLASS_C9C), totals per RS (demanda_SERVEI_CODI_INF_RS_BARCELONA) i totals per UP (demanda_SERVEI_CODI_INF_00101). Diagnostics inclou totals globals per codi (DIAG_CODE_J00) i totals per RS i UP.
+La demanda inclou tres nivells de variables: totals globals sense agrupacio (demanda_SERVEI_CODI_INF, demanda_TIPUS_CLASS_C9C), totals per RS (demanda_SERVEI_CODI_INF_RS_BARCELONA) i totals per UP (demanda_SERVEI_CODI_INF_00101). Les seleccions de RS/UP de demanda nomes limiten les columnes agrupades; `DEMANDA_TOTAL` i les variables globals continuen incloent totes les visites. Diagnostics inclou totals reals amb tots els diagnostics (`DIAG_TOTAL`, `DIAG_TOTAL_RS_*`, `DIAG_TOTAL_UP_*`) i variables especifiques per als codis seleccionats (`DIAG_CODE_J00`, `DIAG_RS_J00_BARCELONA`, `DIAG_UP_J00_00001`).
 
 La validacio executada amb el rang per defecte dona:
 
@@ -294,17 +371,20 @@ Processa visites:
 - Normalitza `UP`.
 - Afegeix `RS` a partir de l'Excel `UPperRS.xlsx`.
 - Classifica tipus de visita en presencial, domiciliaria, telefonica o `NA`.
-- Agrega comptatges per dia i per dimensions com lloc, situacio, servei i tipus.
+- Agrega comptatges globals per dia i per dimensions com lloc, situacio, servei i tipus amb totes les visites.
+- Usa `selections/selected_rs.csv` i `selections/selected_up.csv` per limitar quines RS i UP apareixen en les columnes agrupades de demanda, sense canviar `DEMANDA_TOTAL` ni les variables globals.
 
 ### `pipelines/diagnosis/`
 
 Processa diagnostics:
 
 - Valida que la taula origen tingui les columnes requerides.
-- Filtra codis si existeix `data/diagnosis_pipeline/selected_codes/selected_codes.csv`.
+- Consulta la base agregant en SQL per dia, UP i codi diagnostic normalitzat de 3 caracters.
 - Converteix la data de visita a `timestamp` diari.
 - Afegeix `RS` a partir de l'Excel `UPperRS.xlsx`.
-- Genera comptatges per codi diagnostic, RS i UP.
+- Genera totals amb tots els diagnostics: `DIAG_TOTAL`, `DIAG_TOTAL_RS_*` i `DIAG_TOTAL_UP_*`.
+- Genera variables de codis seleccionats: `DIAG_CODE_*`, `DIAG_RS_<codi>_<RS>` i `DIAG_UP_<codi>_<UP>`.
+- Usa `selections/selected_rs.csv` i `selections/selected_up.csv` per limitar quines RS i UP apareixen en les columnes agrupades, sense canviar el total general.
 
 ### `pipelines/shared/final_joiner.py`
 
