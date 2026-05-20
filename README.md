@@ -336,9 +336,7 @@ Per executar els pipelines reals cal tenir `.env`, ODBC i permisos de base de da
 
 Prioritat alta:
 
-- Consolidar el codi actiu a `pipelines/` i arxivar o eliminar `src/` quan s'hagi validat que ja no cal.
 - Decidir si `data/` s'ha de versionar. En molts projectes de pipelines es millor versionar codi i configuracio, no sortides generades.
-- Deixar un sol fitxer de mapping UP-RS.
 
 Prioritat mitjana:
 
