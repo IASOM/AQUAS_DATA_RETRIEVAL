@@ -1,4 +1,4 @@
-"""Run the pipelines against bundled synthetic CSV data."""
+﻿"""Run the pipelines against bundled synthetic CSV data."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,6 +8,7 @@ import pandas as pd
 
 from pipelines.demand.aggregation_optimized import (
     build_daily_features_by_group_optimized,
+    build_daily_features_global_optimized,
     build_daily_total_cat_optimized,
 )
 from pipelines.demand.transformations import prepare_visits_chunk
@@ -43,15 +44,17 @@ def run_sample_demand_pipeline(input_dir: str | Path, output_dir: str | Path) ->
     visits["timestamp"] = visits["DATA_VISITA"]
 
     cat_daily = build_daily_total_cat_optimized(visits)
+    global_daily = build_daily_features_global_optimized(visits)
     rs_daily = build_daily_features_by_group_optimized(visits, group_col="RS")
     up_daily = build_daily_features_by_group_optimized(visits, group_col="UP")
 
     incremental_dir = output_dir / "demand_pipeline" / "incremental"
     _save_parquet(_with_timestamp_column(cat_daily), incremental_dir / "demand_cat_daily.parquet")
+    _save_parquet(_with_timestamp_column(global_daily), incremental_dir / "demand_global_daily.parquet")
     _save_parquet(_with_timestamp_column(rs_daily), incremental_dir / "demand_rs_daily.parquet")
     _save_parquet(_with_timestamp_column(up_daily), incremental_dir / "demand_up_daily.parquet")
 
-    final = _combine_wide_frames([cat_daily, rs_daily, up_daily])
+    final = _combine_wide_frames([cat_daily, global_daily, rs_daily, up_daily])
     final_path = output_dir / "demand_pipeline" / "finals" / "demand_final.parquet"
     _save_parquet(final, final_path)
     return final_path
@@ -227,3 +230,4 @@ def _save_parquet(df: pd.DataFrame, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, compression="snappy", index=False)
+
