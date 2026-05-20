@@ -94,7 +94,7 @@ def run_incremental_diagnosis_pipeline_optimized(
     selected_codes_file: Optional[str | Path] = None,
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
-    retention_days: int = 90,
+    retention_days: Optional[int] = None,
 ) -> None:
     """
     Run optimized incremental diagnosis pipeline with Parquet storage.
@@ -113,7 +113,8 @@ def run_incremental_diagnosis_pipeline_optimized(
         selected_codes_file: Optional file with selected diagnosis codes to filter
         auth_mode: Database authentication mode
         min_valid_date: Minimum date to process
-        retention_days: Days of incremental data to keep
+        retention_days: Days of incremental data to keep. None keeps all history,
+            which is required when rebuilding final daily files from 2008 onward.
     """
     logger.info("Starting optimized diagnosis pipeline...")
 
@@ -279,5 +280,5 @@ def run_diagnosis_pipeline_main_optimized(config) -> None:
         selected_codes_file=config.PIPELINE_DATA_DIR / "selected_codes" / "selected_codes.csv",
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
-        retention_days=90,
+        retention_days=None,
     )

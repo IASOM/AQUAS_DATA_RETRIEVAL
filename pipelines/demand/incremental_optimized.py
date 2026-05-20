@@ -28,7 +28,7 @@ def run_incremental_pipeline_optimized(
     final_file: str | Path,
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
-    retention_days: int = 90,
+    retention_days: Optional[int] = None,
 ) -> None:
     """
     Run optimized incremental demand pipeline with Parquet storage.
@@ -44,7 +44,8 @@ def run_incremental_pipeline_optimized(
         final_file: Final output parquet file
         auth_mode: Database authentication mode
         min_valid_date: Minimum date to process
-        retention_days: Days of incremental data to keep
+        retention_days: Days of incremental data to keep. None keeps all history,
+            which is required when rebuilding final daily files from 2008 onward.
     """
     logger.info("Starting optimized demand pipeline...")
 
@@ -170,5 +171,5 @@ def run_demand_pipeline_main_optimized(config) -> None:
         final_file=config.PIPELINE_DATA_DIR / "finals" / "demand_final.parquet",
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
-        retention_days=90,
+        retention_days=None,
     )
