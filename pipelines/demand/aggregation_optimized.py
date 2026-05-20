@@ -30,6 +30,9 @@ def build_daily_total_cat_optimized(
     # Ensure datetime
     df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")
 
+    if value_col not in df.columns:
+        df[value_col] = 1
+
     # Vectorized groupby - much faster than iterating
     result = df.groupby(date_column, observed=True)[value_col].sum().to_frame()
     result.columns = ["DEMANDA_TOTAL"]
@@ -58,6 +61,15 @@ def build_daily_features_by_group_optimized(
         Wide DataFrame with daily features
     """
     df = df.copy()
+
+    if value_col not in df.columns:
+        df[value_col] = 1
+
+    if group_col not in df.columns:
+        if "UP" in df.columns:
+            df[group_col] = df["UP"]
+        else:
+            df[group_col] = "NA"
 
     # Ensure datetime
     df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")
@@ -206,17 +218,56 @@ def aggregate_final_optimized(
         start, end = with_range
         df = df[(df[timestamp_col] >= start) & (df[timestamp_col] <= end)]
 
-    # Sort and deduplicate
-    df = df.sort_values(timestamp_col)
-
-    if "feature" in df.columns:
-        # For long format aggregations
-        df = df.drop_duplicates(subset=[timestamp_col, "feature"], keep="last")
-    else:
-        # For wide format aggregations
-        df = df.drop_duplicates(subset=[timestamp_col], keep="last")
+    df = _build_wide_final_by_timestamp(df, timestamp_col)
+    df = _merge_with_existing_final(df, final_store, timestamp_col)
 
     # Save final
     final_store.save_final(df, index_col=timestamp_col)
 
     return df
+
+
+def _build_wide_final_by_timestamp(
+    df: pd.DataFrame,
+    timestamp_col: str = "timestamp",
+) -> pd.DataFrame:
+    """Combine partial wide incremental rows into one row per timestamp."""
+    out = df.copy().drop(columns=["index"], errors="ignore")
+
+    if timestamp_col not in out.columns:
+        if isinstance(out.index, pd.DatetimeIndex):
+            out[timestamp_col] = out.index
+        else:
+            raise ValueError(f"Missing timestamp column: {timestamp_col}")
+
+    out[timestamp_col] = pd.to_datetime(out[timestamp_col]).dt.floor("D")
+
+    value_cols = [col for col in out.columns if col != timestamp_col]
+    out[value_cols] = out[value_cols].apply(pd.to_numeric, errors="coerce")
+
+    return (
+        out.groupby(timestamp_col, as_index=False, observed=True)[value_cols]
+        .sum(min_count=1)
+        .fillna(0)
+        .sort_values(timestamp_col)
+    )
+
+
+def _merge_with_existing_final(
+    new_df: pd.DataFrame,
+    final_store,
+    timestamp_col: str = "timestamp",
+) -> pd.DataFrame:
+    """Merge new final rows with the existing final parquet, if present."""
+    existing_df = final_store.load_final()
+    if existing_df.empty:
+        return new_df
+
+    existing_df = _build_wide_final_by_timestamp(existing_df, timestamp_col)
+
+    existing_idx = existing_df.set_index(timestamp_col)
+    new_idx = new_df.set_index(timestamp_col)
+
+    combined = new_idx.combine_first(existing_idx).sort_index().fillna(0)
+    combined.index.name = timestamp_col
+    return combined.reset_index()

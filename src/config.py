@@ -24,11 +24,16 @@ FINAL_CAT_FILE = BASE_DIR / "finals" / "demanda_CAT.csv"
 FINAL_RS_FILE = BASE_DIR / "finals" / "demanda_RS.csv"
 FINAL_UP_FILE = BASE_DIR / "finals" / "demanda_UP.csv"
 
-UP_RS_FILE = Path("C:/Users/ghernandezgu/Desktop/PREDAP/UP per RS.xlsx")
+UP_RS_FILE = Path("C:/Users/ghernandezgu/Desktop/AQUAS_INTEGRATION/UPperRS.xlsx")
 UP_RS_SHEET = "UP per RS"
 
 AUTH_MODE = "ActiveDirectoryIntegrated"
 MIN_VALID_DATE = "2008-01-01"      #"2008-01-01"
 FINAL_START_DATE =  "2008-01-01"   # "2008-01-01"   # només en el document finals
 FINAL_END_DATE = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+
+
+
+
+
 

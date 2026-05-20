@@ -59,14 +59,15 @@ class ParquetIncrementalManager:
         df = self._optimize_dtypes(df)
 
         # Split into chunks and save
-        num_chunks = max(1, len(df) // self.chunk_size)
-        chunk_dfs = np.array_split(df, num_chunks) if num_chunks > 1 else [df]
-
-        for i, chunk in enumerate(chunk_dfs):
+        for i, start in enumerate(range(0, len(df), self.chunk_size)):
+            chunk = df.iloc[start:start + self.chunk_size].copy()
             chunk_path = (
                 self.output_dir
                 / f"incremental_{pd.Timestamp.now():%Y%m%d_%H%M%S}_{i:03d}.parquet"
             )
+
+
+            
             chunk.to_parquet(chunk_path, compression="snappy", index=False)
             logger.info(f"Saved chunk: {chunk_path.name} ({len(chunk)} rows)")
 
@@ -193,10 +194,15 @@ class ParquetFinalStore:
             index_col: Name for timestamp index column
             compression: Compression algorithm (snappy, gzip, etc.)
         """
-        # Reset index if needed
-        if df.index.name is None and index_col == "timestamp":
-            df = df.reset_index()
+        df = df.copy()
+
+        # Reset index only when the timestamp is actually stored in the index.
+        if index_col in df.columns:
+            df = df.reset_index(drop=True)
         elif isinstance(df.index, pd.DatetimeIndex):
+            df.index.name = index_col
+            df = df.reset_index()
+        elif df.index.name is not None:
             df = df.reset_index()
 
         # Optimize dtypes before saving

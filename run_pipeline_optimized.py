@@ -1,14 +1,11 @@
 """
 Optimized pipeline runner with Parquet storage.
 
-This version uses:
-- Parquet format for efficient storage and compression
-- Partial incremental files (configurable retention)
-- Columnwise merging of demand and diagnosis data
-- Optimized data types and memory usage
+This version supports two execution modes:
+- Production mode: query SQL Server / Azure Synapse.
+- Sample mode: use bundled synthetic CSV data and write sample Parquet outputs.
 """
 import argparse
-import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -17,13 +14,13 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.config import get_config, DemandConfig, DiagnosisConfig
-from pipelines.shared import setup_logging, FinalDataJoiner
+from config.config import DemandConfig, DiagnosisConfig, get_config
+from pipelines.shared import FinalDataJoiner, setup_logging
 
 logger = setup_logging()
 
 
-def run_demand_pipeline_optimized(config: Optional[DemandConfig] = None):
+def run_demand_pipeline_optimized(config: Optional[DemandConfig] = None) -> bool:
     """Run optimized demand pipeline with Parquet storage."""
     if config is None:
         config = get_config("demand")
@@ -36,14 +33,14 @@ def run_demand_pipeline_optimized(config: Optional[DemandConfig] = None):
         from pipelines.demand.incremental_optimized import run_demand_pipeline_main_optimized
 
         run_demand_pipeline_main_optimized(config)
-        logger.info("✓ Demand pipeline completed successfully")
+        logger.info("Demand pipeline completed successfully")
         return True
     except Exception as e:
-        logger.error(f"✗ Demand pipeline failed: {e}", exc_info=True)
+        logger.error(f"Demand pipeline failed: {e}", exc_info=True)
         return False
 
 
-def run_diagnosis_pipeline_optimized(config: Optional[DiagnosisConfig] = None):
+def run_diagnosis_pipeline_optimized(config: Optional[DiagnosisConfig] = None) -> bool:
     """Run optimized diagnosis pipeline with Parquet storage."""
     if config is None:
         config = get_config("diagnosis")
@@ -53,13 +50,15 @@ def run_diagnosis_pipeline_optimized(config: Optional[DiagnosisConfig] = None):
     logger.info("=" * 80)
 
     try:
-        from pipelines.diagnosis.incremental_optimized import run_diagnosis_pipeline_main_optimized
+        from pipelines.diagnosis.incremental_optimized import (
+            run_diagnosis_pipeline_main_optimized,
+        )
 
         run_diagnosis_pipeline_main_optimized(config)
-        logger.info("✓ Diagnosis pipeline completed successfully")
+        logger.info("Diagnosis pipeline completed successfully")
         return True
     except Exception as e:
-        logger.error(f"✗ Diagnosis pipeline failed: {e}", exc_info=True)
+        logger.error(f"Diagnosis pipeline failed: {e}", exc_info=True)
         return False
 
 
@@ -68,17 +67,7 @@ def join_final_outputs(
     diagnosis_file: Optional[Path] = None,
     output_file: Optional[Path] = None,
 ) -> bool:
-    """
-    Join final demand and diagnosis outputs columnwise.
-
-    Args:
-        demand_file: Path to demand final parquet file
-        diagnosis_file: Path to diagnosis final parquet file
-        output_file: Path to save joined output
-
-    Returns:
-        Success status
-    """
+    """Join final demand and diagnosis outputs columnwise."""
     logger.info("=" * 80)
     logger.info("JOINING DEMAND AND DIAGNOSIS DATA COLUMNWISE")
     logger.info("=" * 80)
@@ -87,7 +76,6 @@ def join_final_outputs(
         demand_config = get_config("demand")
         diagnosis_config = get_config("diagnosis")
 
-        # Use provided paths or defaults
         demand_path = demand_file or (
             demand_config.PIPELINE_DATA_DIR / "finals" / "demand_final.parquet"
         )
@@ -100,16 +88,13 @@ def join_final_outputs(
             / "demand_diagnosis_joined.parquet"
         )
 
-        # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Join columnwise
         joiner = FinalDataJoiner(
             demand_final_file=demand_path,
             diagnosis_final_file=diagnosis_path,
             output_file=output_path,
         )
-
         joiner.join_and_save(
             demand_prefix="DEMAND",
             diagnosis_prefix="DIAGNOSIS",
@@ -117,33 +102,85 @@ def join_final_outputs(
             compression="snappy",
         )
 
-        logger.info(f"✓ Final join completed: {output_path}")
+        logger.info(f"Final join completed: {output_path}")
         return True
-
     except Exception as e:
-        logger.error(f"✗ Final join failed: {e}", exc_info=True)
+        logger.error(f"Final join failed: {e}", exc_info=True)
         return False
 
 
-def main():
+def run_demand_sample_pipeline(input_dir: Path, output_dir: Path) -> bool:
+    """Run demand pipeline with bundled synthetic sample data."""
+    logger.info("=" * 80)
+    logger.info("STARTING SAMPLE DEMAND PIPELINE")
+    logger.info("=" * 80)
+
+    try:
+        from pipelines.sample_runner import run_sample_demand_pipeline
+
+        output_path = run_sample_demand_pipeline(input_dir, output_dir)
+        logger.info(f"Sample demand pipeline completed: {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Sample demand pipeline failed: {e}", exc_info=True)
+        return False
+
+
+def run_diagnosis_sample_pipeline(input_dir: Path, output_dir: Path) -> bool:
+    """Run diagnosis pipeline with bundled synthetic sample data."""
+    logger.info("=" * 80)
+    logger.info("STARTING SAMPLE DIAGNOSIS PIPELINE")
+    logger.info("=" * 80)
+
+    try:
+        from pipelines.sample_runner import run_sample_diagnosis_pipeline
+
+        output_path = run_sample_diagnosis_pipeline(input_dir, output_dir)
+        logger.info(f"Sample diagnosis pipeline completed: {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Sample diagnosis pipeline failed: {e}", exc_info=True)
+        return False
+
+
+def join_sample_final_outputs(output_dir: Path) -> bool:
+    """Join sample demand and diagnosis outputs."""
+    logger.info("=" * 80)
+    logger.info("JOINING SAMPLE DEMAND AND DIAGNOSIS DATA")
+    logger.info("=" * 80)
+
+    try:
+        from pipelines.sample_runner import join_sample_outputs
+
+        output_path = join_sample_outputs(output_dir)
+        logger.info(f"Sample final join completed: {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Sample final join failed: {e}", exc_info=True)
+        return False
+
+
+def main() -> int:
     """Main entry point for optimized pipeline runner."""
     parser = argparse.ArgumentParser(
         description="Run PREDAP data processing pipelines (Optimized with Parquet)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run_pipeline_optimized.py --demand              Run demand pipeline only
-  python run_pipeline_optimized.py --diagnosis           Run diagnosis pipeline only
-  python run_pipeline_optimized.py --both                Run both pipelines
-  python run_pipeline_optimized.py --all                 Run both + final join
-  python run_pipeline_optimized.py --join-final          Join final outputs only
-  python run_pipeline_optimized.py --help                Show this help
+  python run_pipeline.py --demand                        Run demand pipeline only
+  python run_pipeline.py --diagnosis                     Run diagnosis pipeline only
+  python run_pipeline.py --both                          Run both pipelines
+  python run_pipeline.py --all                           Run both + final join
+  python run_pipeline.py --sample --all                  Run sample data + final join
+  python run_pipeline.py --join-final                    Join final outputs only
+  python run_pipeline.py --help                          Show this help
 
 Features:
   - Parquet format for efficient storage (snappy compression)
   - Partial incremental files (90-day retention by default)
   - Timestamp columns for tracking
   - Columnwise joining of demand and diagnosis
+  - Synthetic sample mode without database access
   - Optimized data types and memory usage
         """,
     )
@@ -174,6 +211,23 @@ Features:
         help="Join final demand and diagnosis outputs columnwise",
     )
     parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Use local synthetic CSV data instead of querying the database",
+    )
+    parser.add_argument(
+        "--sample-input-dir",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "sample" / "input",
+        help="Directory with synthetic sample CSV inputs",
+    )
+    parser.add_argument(
+        "--sample-output-dir",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "sample" / "output",
+        help="Directory where sample Parquet outputs will be written",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -182,7 +236,6 @@ Features:
 
     args = parser.parse_args()
 
-    # Determine which pipelines to run
     run_demand = False
     run_diagnosis = False
     run_join = False
@@ -198,7 +251,6 @@ Features:
         run_diagnosis = True
         run_join = True
     else:
-        # Default: run both
         run_demand = True
         run_diagnosis = True
 
@@ -207,31 +259,53 @@ Features:
         run_diagnosis = True
 
     logger.info("=" * 80)
-    logger.info("OPTIMIZED PREDAP PIPELINE EXECUTION")
+    if args.sample:
+        logger.info("SAMPLE PREDAP PIPELINE EXECUTION")
+        logger.info(f"Sample input dir: {args.sample_input_dir}")
+        logger.info(f"Sample output dir: {args.sample_output_dir}")
+    else:
+        logger.info("OPTIMIZED PREDAP PIPELINE EXECUTION")
     logger.info("=" * 80)
 
     results = []
 
     if run_demand:
-        success = run_demand_pipeline_optimized()
-        results.append(("Demand Pipeline", success))
+        if args.sample:
+            success = run_demand_sample_pipeline(
+                args.sample_input_dir,
+                args.sample_output_dir,
+            )
+            results.append(("Sample Demand Pipeline", success))
+        else:
+            success = run_demand_pipeline_optimized()
+            results.append(("Demand Pipeline", success))
 
     if run_diagnosis:
-        success = run_diagnosis_pipeline_optimized()
-        results.append(("Diagnosis Pipeline", success))
+        if args.sample:
+            success = run_diagnosis_sample_pipeline(
+                args.sample_input_dir,
+                args.sample_output_dir,
+            )
+            results.append(("Sample Diagnosis Pipeline", success))
+        else:
+            success = run_diagnosis_pipeline_optimized()
+            results.append(("Diagnosis Pipeline", success))
 
     if run_join:
-        success = join_final_outputs()
-        results.append(("Final Join", success))
+        if args.sample:
+            success = join_sample_final_outputs(args.sample_output_dir)
+            results.append(("Sample Final Join", success))
+        else:
+            success = join_final_outputs()
+            results.append(("Final Join", success))
 
     logger.info("=" * 80)
     logger.info("EXECUTION SUMMARY:")
     for name, success in results:
-        status = "✓ SUCCESS" if success else "✗ FAILED"
+        status = "SUCCESS" if success else "FAILED"
         logger.info(f"  {name}: {status}")
     logger.info("=" * 80)
 
-    # Exit with appropriate code
     all_success = all(success for _, success in results)
     return 0 if all_success else 1
 

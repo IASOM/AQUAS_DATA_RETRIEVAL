@@ -177,7 +177,7 @@ run_pipeline.py                  (Single entry point)
    
    # Base Paths
    BASE_DIR=C:/Users/YourUsername/Desktop/GIT
-   UP_RS_FILE=C:/path/to/UP per RS.xlsx
+   UP_RS_FILE=C:/path/to/UPperRS.xlsx
    ```
 
 ### Phase 6: Test Migration

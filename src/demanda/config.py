@@ -26,7 +26,7 @@ FINAL_CAT_FILE = BASE_DIR / "finals" / "demanda_CAT.csv"
 FINAL_RS_FILE = BASE_DIR / "finals" / "demanda_RS.csv"
 FINAL_UP_FILE = BASE_DIR / "finals" / "demanda_UP.csv"
 
-UP_RS_FILE = Path("C:/Users/ghernandezgu/Desktop/PREDAP/UP per RS.xlsx")
+UP_RS_FILE = Path("C:/Users/ghernandezgu/Desktop/PREDAP/UPperRS.xlsx")
 UP_RS_SHEET = "UP per RS"
 
 AUTH_MODE = "ActiveDirectoryIntegrated"

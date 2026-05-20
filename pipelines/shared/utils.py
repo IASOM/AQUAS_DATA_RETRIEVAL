@@ -1,10 +1,14 @@
 """Shared utility functions for data processing and state management."""
+from __future__ import annotations
+
 import json
 import pandas as pd
-import pyodbc
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pyodbc
 
 
 def ensure_daily_range(

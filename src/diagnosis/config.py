@@ -25,7 +25,7 @@ SELECTED_CODES_FILE = BASE_DIR / "selected_codes" / "selected_codes.csv"
 FINAL_OUTPUT_DIR = BASE_DIR / "finals"
 INCREMENTAL_OUTPUT_DIR = BASE_DIR / "incremental"
 
-UP_RS_FILE = Path("C:/Users/ghernandezgu/Desktop/PREDAP/UP per RS.xlsx")
+UP_RS_FILE = Path("C:/Users/ghernandezgu/Desktop/PREDAP/UPperRS.xlsx")
 UP_RS_SHEET = "UP per RS"
 
 AUTH_MODE = "ActiveDirectoryIntegrated"

@@ -1,5 +1,4 @@
 """Shared utilities for pipelines."""
-from .db import get_connection
 from .utils import (
     ensure_daily_range,
     load_output_matrix,
@@ -18,6 +17,14 @@ from .parquet_storage import (
     load_and_merge_final_outputs,
 )
 from .final_joiner import FinalDataJoiner, IncrementalFinalJoiner
+
+
+def get_connection(*args, **kwargs):
+    """Create a database connection, importing pyodbc only when needed."""
+    from .db import get_connection as _get_connection
+
+    return _get_connection(*args, **kwargs)
+
 
 __all__ = [
     "get_connection",

@@ -134,7 +134,7 @@ AUTH_MODE=ActiveDirectoryIntegrated
 
 ```env
 BASE_DIR=C:/path/to/GIT
-UP_RS_FILE=C:/path/to/UP per RS.xlsx
+UP_RS_FILE=C:/path/to/UPperRS.xlsx
 ```
 
 ### Logging Level (.env)

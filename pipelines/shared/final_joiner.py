@@ -118,10 +118,10 @@ class FinalDataJoiner:
         # Handle missing values
         if fill_method == "ffill":
             logger.info("Filling missing values with forward fill...")
-            merged = merged.fillna(method="ffill")
+            merged = merged.ffill()
         elif fill_method == "bfill":
             logger.info("Filling missing values with backward fill...")
-            merged = merged.fillna(method="bfill")
+            merged = merged.bfill()
         elif fill_method == "interpolate":
             logger.info("Interpolating missing values...")
             numeric_cols = merged.select_dtypes(include=[float, int]).columns

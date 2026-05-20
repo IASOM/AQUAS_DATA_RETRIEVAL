@@ -135,8 +135,8 @@ def run_incremental_pipeline_optimized(
 
             # Add to incremental storage
             add_incremental_optimized(cat_daily.reset_index(), incremental_mgr)
-            add_incremental_optimized(rs_daily.reset_index(), incremental_mgr)
-            add_incremental_optimized(up_daily.reset_index(), incremental_mgr)
+            add_incremental_optimized(rs_daily, incremental_mgr)
+            add_incremental_optimized(up_daily, incremental_mgr)
 
             # Track max date
             chunk_max = df_chunk["timestamp"].max()

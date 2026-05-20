@@ -3,7 +3,7 @@ import pyodbc
 def get_connection(
     db_server: str,
     db_database: str,
-    auth_mode: str = "ActiveDirectoryIntegrted",
+    auth_mode: str = "ActiveDirectoryIntegrated",
     timeout: int = 60,
 ) -> pyodbc.Connection:
     connection_string = (
