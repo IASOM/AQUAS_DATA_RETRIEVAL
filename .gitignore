@@ -1,4 +1,4 @@
-# .gitignore
+﻿# .gitignore
 
 # Python
 __pycache__/
@@ -31,7 +31,7 @@ MANIFEST
 # Virtual environments
 venv/
 env/
-.venv
+.venv/
 
 # IDE
 .vscode/
@@ -41,23 +41,35 @@ env/
 *~
 .DS_Store
 
-# Environment variables
+# Environment variables and local secrets
 .env
 .env.local
 .env.*.local
 
-# Data directories (optional - uncomment to ignore data/)
-# data/
-data/sample/output/
-
-# Logs
-*.log
-logs/
+# Data and generated pipeline outputs
+# Keep real data, generated samples, Parquet/CSV outputs and pipeline state out
+# of Git. Recreate sample outputs with scripts/create_multiyear_sample.py.
+data/
+diagnosis_pipeline/
+*.parquet
+*.csv
+*.pkl
+*.pickle
+*.feather
 
 # Database files
 *.db
 *.sqlite
 *.sqlite3
+
+# Local mapping/data spreadsheets. Keep only non-sensitive templates in Git.
+*.xlsx
+*.xls
+!UPperRS.example.xlsx
+
+# Logs
+*.log
+logs/
 
 # Temporary files
 *.tmp

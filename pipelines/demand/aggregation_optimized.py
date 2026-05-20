@@ -1,4 +1,4 @@
-"""Optimized demand pipeline with Parquet storage and partial incremental files."""
+﻿"""Optimized demand pipeline with Parquet storage and partial incremental files."""
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -39,6 +39,66 @@ def build_daily_total_cat_optimized(
 
     return result
 
+
+def build_daily_features_global_optimized(
+    df: pd.DataFrame,
+    date_column: str = "timestamp",
+    value_col: str = "counts",
+    prefix: str = "demanda",
+) -> pd.DataFrame:
+    """
+    Build daily categorical totals without RS/UP grouping.
+
+    For example: demanda_SERVEI_CODI_INF, demanda_TIPUS_CLASS_C9C.
+    These columns represent Catalunya/global totals for each category value.
+    """
+    df = df.copy()
+
+    if value_col not in df.columns:
+        df[value_col] = 1
+
+    df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")
+
+    categorical_vars = [
+        col
+        for col in [
+            "VISI_LLOC_VISITA",
+            "VISI_SITUACIO_VISITA",
+            "SERVEI_CODI",
+            "TIPUS_CLASS",
+            "TIPUS_VISITA_AGRUPAT",
+        ]
+        if col in df.columns
+    ]
+
+    pieces = []
+    for var in categorical_vars:
+        tmp = df[[date_column, var, value_col]].copy()
+        tmp[var] = tmp[var].fillna("NA").astype(str).str.strip().replace("", "NA")
+        tmp["feature"] = f"{prefix}_{var}_" + tmp[var]
+        tmp = (
+            tmp.groupby([date_column, "feature"], as_index=False, observed=True)[
+                value_col
+            ]
+            .sum()
+        )
+        pieces.append(tmp)
+
+    if not pieces:
+        return pd.DataFrame()
+
+    long_df = pd.concat(pieces, ignore_index=True)
+    wide = long_df.pivot_table(
+        index=date_column,
+        columns="feature",
+        values=value_col,
+        aggfunc="sum",
+        fill_value=0,
+        observed=True,
+    )
+    wide.index = pd.to_datetime(wide.index)
+    wide["timestamp"] = wide.index
+    return wide.sort_index()
 
 def build_daily_features_by_group_optimized(
     df: pd.DataFrame,
@@ -271,3 +331,4 @@ def _merge_with_existing_final(
     combined = new_idx.combine_first(existing_idx).sort_index().fillna(0)
     combined.index.name = timestamp_col
     return combined.reset_index()
+

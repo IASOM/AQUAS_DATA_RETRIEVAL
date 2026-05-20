@@ -1,4 +1,4 @@
-# AQUAS / PREDAP Data Pipelines
+﻿# AQUAS / PREDAP Data Pipelines
 
 Projecte Python per extreure dades de SQL Server / Azure Synapse, transformar-les i generar sortides Parquet per a l'analisi de demanda assistencial i diagnostics.
 
@@ -19,7 +19,7 @@ El codi implementa dos pipelines principals:
 | Demanda | `z_inv.P1038_visites` | Comptar visites per dia i generar variables agregades per Catalunya, RS i UP | `data/demand_pipeline/finals/demand_final.parquet` |
 | Diagnostics | `z_inv.P1038_prstb015r_filtrat` | Comptar diagnostics per dia, codi diagnostic, RS i UP, opcionalment filtrant per codis seleccionats | `data/diagnosis_pipeline/finals/diagnosis_final.parquet` |
 
-També pot unir les dues sortides finals en un sol fitxer:
+TambÃ© pot unir les dues sortides finals en un sol fitxer:
 
 ```text
 data/finals/demand_diagnosis_joined.parquet
@@ -70,7 +70,7 @@ AQUAS_INTEGRATION/
   UPperRS.xlsx
 ```
 
-## Instal·lacio
+## InstalÂ·lacio
 
 Requisits:
 
@@ -139,6 +139,19 @@ python run_pipeline.py --sample --all
 
 Aquest mode llegeix els CSVs de `data/sample/input/` i escriu els Parquet a `data/sample/output/`.
 
+Generar una mostra sintetica multi-any, crear finals Parquet i exportar tambe CSVs llegibles:
+
+```bash
+python -B scripts/create_multiyear_sample.py
+```
+
+Per defecte genera dades diaries des de `2008-01-01` fins a `2012-12-31`.
+Es pot canviar el rang:
+
+```bash
+python -B scripts/create_multiyear_sample.py --start 2008-01-01 --end 2025-12-31
+```
+
 Fer nomes el join de finals ja generats:
 
 ```bash
@@ -161,6 +174,8 @@ python run_pipeline.py --help
 | `data/diagnosis_pipeline/finals/diagnosis_final.parquet` | Matriu final de diagnostics |
 | `data/finals/demand_diagnosis_joined.parquet` | Demanda i diagnostics units per `timestamp` |
 | `data/sample/output/` | Sortides generades pel mode `--sample` |
+| `data/sample/multiyear_input/` | CSVs sintetiques multi-any generades per `scripts/create_multiyear_sample.py` |
+| `data/sample/multiyear_output/` | Finals Parquet i CSV de la mostra multi-any |
 
 ## Dades sintetiques
 
@@ -182,11 +197,76 @@ python run_pipeline.py --sample --all
 python run_pipeline.py --sample --join-final
 ```
 
-També es poden passar carpetes alternatives:
+TambÃ© es poden passar carpetes alternatives:
 
 ```bash
 python run_pipeline.py --sample --all --sample-input-dir data/sample/input --sample-output-dir data/sample/output
 ```
+
+### Mostra multi-any per validar files diaries
+
+El script `scripts/create_multiyear_sample.py` crea una mostra sintetica mes gran per validar que el pipeline conserva tots els dies de tots els anys processats. Genera:
+
+| Fitxer | Contingut |
+| --- | --- |
+| `data/sample/multiyear_input/up_rs.csv` | Mapping UP -> RS de prova |
+| `data/sample/multiyear_input/demand_visits.csv` | Visites sintetiques repartides per tots els dies del rang |
+| `data/sample/multiyear_input/diagnosis_visits.csv` | Diagnostics sintetics repartits per tots els dies del rang |
+| `data/sample/multiyear_input/selected_codes.csv` | Codis diagnostics inclosos en la mostra |
+
+I escriu aquestes sortides finals:
+
+| Fitxer | Format | Contingut |
+| --- | --- | --- |
+| `data/sample/multiyear_output/demand_pipeline/finals/demand_final.parquet` | Parquet | Final de demanda |
+| `data/sample/multiyear_output/demand_pipeline/finals/demand_final.csv` | CSV | Copia llegible del final de demanda |
+| `data/sample/multiyear_output/diagnosis_pipeline/finals/diagnosis_final.parquet` | Parquet | Final de diagnostics |
+| `data/sample/multiyear_output/diagnosis_pipeline/finals/diagnosis_final.csv` | CSV | Copia llegible del final de diagnostics |
+| `data/sample/multiyear_output/finals/demand_diagnosis_joined.parquet` | Parquet | Final unit demanda + diagnostics |
+| `data/sample/multiyear_output/finals/demand_diagnosis_joined.csv` | CSV | Copia llegible del final unit |
+
+La demanda inclou tres nivells de variables: totals globals sense agrupacio (demanda_SERVEI_CODI_INF, demanda_TIPUS_CLASS_C9C), totals per RS (demanda_SERVEI_CODI_INF_RS_BARCELONA) i totals per UP (demanda_SERVEI_CODI_INF_00101). Diagnostics inclou totals globals per codi (DIAG_CODE_J00) i totals per RS i UP.
+
+La validacio executada amb el rang per defecte dona:
+
+| Sortida | Files | Columnes | Rang |
+| --- | ---: | ---: | --- |
+| Demand final | 1827 | 139 | `2008-01-01` -> `2012-12-31` |
+| Diagnosis final | 1827 | 17 | `2008-01-01` -> `2012-12-31` |
+| Joined final | 1827 | 155 | `2008-01-01` -> `2012-12-31` |
+
+Per comprovar els resultats generats:
+
+```bash
+python -B -c "import pandas as pd; df=pd.read_parquet('data/sample/multiyear_output/finals/demand_diagnosis_joined.parquet'); print(df.shape); print(df[['timestamp']].head()); print(df[['timestamp']].tail())"
+```
+
+## Nota important sobre el Parquet final de 35 files
+
+Si `demand_final.parquet` queda amb nomes unes poques files, per exemple 35 files, tot i haver processat anys complets, la causa probable era la retencio dels incrementals. La versio optimitzada escrivia chunks historics a `data/*/incremental/`, pero despres aplicava `retention_days=90`. Quan es reconstruia un historic des de 2008, els chunks de 2008-2025 quedaven per sota del tall de 90 dies i s'esborraven abans de crear el final. Per aixo nomes sobrevivia el chunk mes recent.
+
+Aixo s'ha corregit aixi:
+
+- `ParquetIncrementalManager` usa `retention_days=None` per defecte, de manera que conserva tots els chunks incrementals durant una reconstruccio historica.
+- Els runners optimitzats de demanda i diagnostics passen `retention_days=None`.
+- Els noms dels chunks incrementals inclouen microsegons i un identificador curt aleatori per evitar col.lisions quan es guarden diversos fitxers dins el mateix segon.
+
+Si ja existeixen sortides dolentes d'una execucio anterior, elimina els incrementals i finals abans de regenerar:
+
+```powershell
+Remove-Item -Recurse -Force .\data\demand_pipeline\incremental
+Remove-Item -Recurse -Force .\data\demand_pipeline\finals
+Remove-Item -Recurse -Force .\data\diagnosis_pipeline\incremental
+Remove-Item -Recurse -Force .\data\diagnosis_pipeline\finals
+```
+
+Despres torna a executar:
+
+```bash
+python run_pipeline.py --all
+```
+
+Si la pipeline de diagnostics falla amb un missatge de token expirat d'Azure/SQL, reinicia la sessio o torna a autenticar-te i repeteix l'execucio. Aquest error no esta relacionat amb el nombre de files del Parquet final.
 
 ## Components principals
 
@@ -204,7 +284,7 @@ Conte utilitats comunes: lectura de rangs de dates, particio per anys, consultes
 
 ### `pipelines/shared/parquet_storage.py`
 
-Gestiona incrementals Parquet, metadades, retencio de fitxers antics i escriptura de sortides finals.
+Gestiona incrementals Parquet, metadades, retencio opcional de fitxers antics i escriptura de sortides finals. En reconstruccions historiques s'ha de mantenir `retention_days=None` per conservar tots els dies abans de l'agregacio final.
 
 ### `pipelines/demand/`
 
@@ -237,6 +317,7 @@ Aquestes comprovacions no requereixen connexio a la base de dades:
 ```bash
 python run_pipeline.py --help
 python run_pipeline.py --sample --all
+python -B scripts/create_multiyear_sample.py
 python -m compileall -q run_pipeline.py run_pipeline_optimized.py config pipelines validate_project.py check_columns.py
 ```
 
@@ -264,3 +345,6 @@ Prioritat mitjana:
 - Unificar documentacio dispersa (`QUICKSTART.md`, `PROJECT_STRUCTURE.md`, `MIGRATION.md`, `OPTIMIZED_PIPELINE.md`, etc.) o marcar clarament quina documentacio es historica.
 - Fer que `check_columns.py` reutilitzi la configuracio central.
 - Afegir tests petits per transformacions i agregacions abans de tocar l'esquema de sortida.
+
+
+

@@ -1,4 +1,4 @@
-"""Optimized demand pipeline main runner with Parquet storage."""
+﻿"""Optimized demand pipeline main runner with Parquet storage."""
 import pandas as pd
 import logging
 from pathlib import Path
@@ -8,6 +8,7 @@ from pipelines.shared import get_connection, setup_logging, get_min_max_date, ge
 from pipelines.shared.parquet_storage import ParquetIncrementalManager, ParquetFinalStore
 from .aggregation_optimized import (
     build_daily_total_cat_optimized,
+    build_daily_features_global_optimized,
     build_daily_features_by_group_optimized,
     add_incremental_optimized,
     aggregate_final_optimized,
@@ -28,7 +29,7 @@ def run_incremental_pipeline_optimized(
     final_file: str | Path,
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
-    retention_days: int = 90,
+    retention_days: Optional[int] = None,
 ) -> None:
     """
     Run optimized incremental demand pipeline with Parquet storage.
@@ -44,7 +45,8 @@ def run_incremental_pipeline_optimized(
         final_file: Final output parquet file
         auth_mode: Database authentication mode
         min_valid_date: Minimum date to process
-        retention_days: Days of incremental data to keep
+        retention_days: Days of incremental data to keep. None keeps all history,
+            which is required when rebuilding final daily files from 2008 onward.
     """
     logger.info("Starting optimized demand pipeline...")
 
@@ -126,6 +128,7 @@ def run_incremental_pipeline_optimized(
 
             # Build aggregations efficiently
             cat_daily = build_daily_total_cat_optimized(df_chunk)
+            global_daily = build_daily_features_global_optimized(df_chunk)
             rs_daily = build_daily_features_by_group_optimized(
                 df_chunk, group_col="RS"
             )
@@ -135,6 +138,7 @@ def run_incremental_pipeline_optimized(
 
             # Add to incremental storage
             add_incremental_optimized(cat_daily.reset_index(), incremental_mgr)
+            add_incremental_optimized(global_daily, incremental_mgr)
             add_incremental_optimized(rs_daily, incremental_mgr)
             add_incremental_optimized(up_daily, incremental_mgr)
 
@@ -145,7 +149,7 @@ def run_incremental_pipeline_optimized(
                     global_max_loaded = chunk_max
 
             # Clean up
-            del df_chunk, cat_daily, rs_daily, up_daily
+            del df_chunk, cat_daily, global_daily, rs_daily, up_daily
 
         # Aggregate to final
         logger.info("Aggregating to final output...")
@@ -170,5 +174,6 @@ def run_demand_pipeline_main_optimized(config) -> None:
         final_file=config.PIPELINE_DATA_DIR / "finals" / "demand_final.parquet",
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
-        retention_days=90,
+        retention_days=None,
     )
+

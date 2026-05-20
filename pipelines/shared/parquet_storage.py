@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
 import logging
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class ParquetIncrementalManager:
     def __init__(
         self,
         output_dir: str | Path,
-        retention_days: int = 90,
+        retention_days: Optional[int] = None,
         chunk_size: int = 50000,
     ):
         """
@@ -22,7 +23,8 @@ class ParquetIncrementalManager:
 
         Args:
             output_dir: Directory for parquet files
-            retention_days: Days of incremental data to keep (older auto-deleted)
+            retention_days: Days of incremental data to keep. Use None to keep all
+                incremental files until the final aggregation has been built.
             chunk_size: Rows per file for optimal memory usage
         """
         self.output_dir = Path(output_dir)
@@ -63,7 +65,10 @@ class ParquetIncrementalManager:
             chunk = df.iloc[start:start + self.chunk_size].copy()
             chunk_path = (
                 self.output_dir
-                / f"incremental_{pd.Timestamp.now():%Y%m%d_%H%M%S}_{i:03d}.parquet"
+                / (
+                    f"incremental_{pd.Timestamp.now():%Y%m%d_%H%M%S_%f}_"
+                    f"{uuid4().hex[:8]}_{i:03d}.parquet"
+                )
             )
 
 
@@ -108,6 +113,9 @@ class ParquetIncrementalManager:
 
     def _cleanup_retention(self, timestamp_col: str) -> None:
         """Remove incremental files older than retention period."""
+        if self.retention_days is None or self.retention_days <= 0:
+            return
+
         cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=self.retention_days)
         parquet_files = list(self.output_dir.glob("incremental_*.parquet"))
 
