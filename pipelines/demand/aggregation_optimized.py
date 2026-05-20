@@ -253,6 +253,7 @@ def aggregate_final_optimized(
     final_store,
     timestamp_col: str = "timestamp",
     with_range: Optional[tuple] = None,
+    clear_incremental: bool = True,
 ) -> pd.DataFrame:
     """
     Efficiently aggregate incremental data to final output.
@@ -266,25 +267,62 @@ def aggregate_final_optimized(
     Returns:
         Aggregated DataFrame
     """
-    # Load all incremental data
-    df = incremental_manager.load_all_incremental(timestamp_col)
-
-    if df.empty:
+    parquet_files = incremental_manager.iter_incremental_files()
+    if not parquet_files:
         logger.warning("No incremental data to aggregate")
         return pd.DataFrame()
 
-    # Filter by range if specified
-    if with_range:
-        start, end = with_range
-        df = df[(df[timestamp_col] >= start) & (df[timestamp_col] <= end)]
+    parts = []
+    for parquet_file in parquet_files:
+        try:
+            df = pd.read_parquet(parquet_file)
+        except Exception as e:
+            logger.error(f"Error reading {parquet_file}: {e}")
+            continue
 
-    df = _build_wide_final_by_timestamp(df, timestamp_col)
+        if df.empty:
+            continue
+
+        if "data_id" in df.columns:
+            df = df.drop_duplicates(subset=["data_id"], keep="last")
+
+        if with_range:
+            start, end = with_range
+            df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+            df = df[(df[timestamp_col] >= start) & (df[timestamp_col] <= end)]
+
+        if not df.empty:
+            parts.append(_build_wide_final_by_timestamp(df, timestamp_col))
+
+    if not parts:
+        logger.warning("No incremental data to aggregate")
+        return pd.DataFrame()
+
+    df = _combine_wide_parts(parts, timestamp_col)
     df = _merge_with_existing_final(df, final_store, timestamp_col)
 
     # Save final
     final_store.save_final(df, index_col=timestamp_col)
 
+    if clear_incremental:
+        incremental_manager.clear_incremental_files()
+
     return df
+
+
+def _combine_wide_parts(
+    frames: list[pd.DataFrame],
+    timestamp_col: str,
+) -> pd.DataFrame:
+    """Combine already-aggregated wide frames without loading raw history."""
+    indexed = [frame.set_index(timestamp_col) for frame in frames if not frame.empty]
+    if not indexed:
+        return pd.DataFrame()
+
+    combined = pd.concat(indexed, axis=0).fillna(0)
+    combined = combined.groupby(level=0, observed=True).sum(min_count=1).fillna(0)
+    combined.index.name = timestamp_col
+    return combined.sort_index().reset_index()
 
 
 def _build_wide_final_by_timestamp(

@@ -10,8 +10,8 @@ from .aggregation_optimized import (
     build_daily_diagnosis_counts_optimized,
     build_daily_diagnosis_by_group_optimized,
     build_diagnosis_wide_format_optimized,
-    add_incremental_diagnosis_optimized,
     aggregate_diagnosis_final_optimized,
+    _build_diagnosis_wide_final,
 )
 
 logger = setup_logging()
@@ -122,7 +122,7 @@ def run_incremental_diagnosis_pipeline_optimized(
     incremental_mgr = ParquetIncrementalManager(
         incremental_dir,
         retention_days=retention_days,
-        chunk_size=50000,
+        chunk_size=10000,
     )
     final_store = ParquetFinalStore(final_file)
 
@@ -237,12 +237,23 @@ def run_incremental_diagnosis_pipeline_optimized(
             )
             wide_format = build_diagnosis_wide_format_optimized(df_chunk)
 
-            # Add to incremental storage
-            add_incremental_diagnosis_optimized(total_daily, incremental_mgr)
-            add_incremental_diagnosis_optimized(rs_daily, incremental_mgr)
-            add_incremental_diagnosis_optimized(up_daily, incremental_mgr)
-            add_incremental_diagnosis_optimized(
-                wide_format.reset_index(drop=True), incremental_mgr
+            # Store one already-aggregated daily file per processed year.
+            yearly_daily = _build_diagnosis_wide_final(
+                pd.concat(
+                    [
+                        total_daily,
+                        rs_daily,
+                        up_daily,
+                        wide_format.reset_index(drop=True),
+                    ],
+                    ignore_index=True,
+                    sort=False,
+                )
+            )
+            incremental_mgr.add_data(yearly_daily, timestamp_col="timestamp")
+            logger.info(
+                f"Saved diagnosis year {year} daily aggregate "
+                f"({len(yearly_daily)} rows)"
             )
 
             # Track max date
@@ -252,7 +263,7 @@ def run_incremental_diagnosis_pipeline_optimized(
                     global_max_loaded = chunk_max
 
             # Clean up
-            del df_chunk, total_daily, rs_daily, up_daily, wide_format
+            del df_chunk, total_daily, rs_daily, up_daily, wide_format, yearly_daily
 
         # Aggregate to final
         logger.info("Aggregating diagnosis to final output...")
