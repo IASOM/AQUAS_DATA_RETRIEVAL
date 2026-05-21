@@ -86,11 +86,6 @@ def run_sample_diagnosis_pipeline(
     )
     selected_codes = _load_selected_codes(input_dir)
 
-    diagnosis["problema_salut_c"] = _normalize_diag_codes(diagnosis["problema_salut_c"])
-    if selected_codes:
-        diagnosis = diagnosis[diagnosis["problema_salut_c"].isin(selected_codes)].copy()
-        diagnosis["problema_salut_c"] = diagnosis["problema_salut_c"].map(selected_codes)
-
     diagnosis["timestamp"] = pd.to_datetime(
         diagnosis["data_visita"],
         errors="coerce",
@@ -100,6 +95,7 @@ def run_sample_diagnosis_pipeline(
     diagnosis = diagnosis[diagnosis["timestamp"] < _tomorrow()].copy()
     diagnosis["up_c"] = diagnosis["up_c"].astype(str).str.zfill(5)
     diagnosis["n"] = 1
+    diagnosis["problema_salut_c"] = _normalize_diag_codes(diagnosis["problema_salut_c"])
     diagnosis = diagnosis.rename(columns={"problema_salut_c": "DIAG_CODE"})
 
     up_rs_map = up_rs[["Codi UP", "RS"]].copy()
@@ -109,9 +105,10 @@ def run_sample_diagnosis_pipeline(
     diagnosis["RS"] = diagnosis["RS"].fillna("UNKNOWN")
 
     total_daily = build_daily_total_general_optimized(diagnosis)
-    code_daily = build_diagnosis_wide_format_optimized(diagnosis)
-    rs_long = build_daily_diagnosis_by_group_optimized(diagnosis, group_col="RS")
-    up_long = build_daily_diagnosis_by_group_optimized(diagnosis, group_col="up_c")
+    code_diagnosis = _expand_selected_code_aliases(diagnosis, selected_codes)
+    code_daily = build_diagnosis_wide_format_optimized(code_diagnosis)
+    rs_long = build_daily_diagnosis_by_group_optimized(code_diagnosis, group_col="RS")
+    up_long = build_daily_diagnosis_by_group_optimized(code_diagnosis, group_col="up_c")
 
     rs_wide = _pivot_diagnosis_group(rs_long, group_column="DIAG_RS", label="RS")
     up_wide = _pivot_diagnosis_group(up_long, group_column="DIAG_up_c", label="UP")
@@ -165,7 +162,7 @@ def _load_up_rs(input_dir: Path) -> pd.DataFrame:
     return up_rs
 
 
-def _load_selected_codes(input_dir: Path) -> dict[str, str]:
+def _load_selected_codes(input_dir: Path) -> dict[str, list[str]]:
     path = input_dir / SAMPLE_INPUT_FILES["selected_codes"]
     if not path.exists():
         return {}
@@ -173,15 +170,41 @@ def _load_selected_codes(input_dir: Path) -> dict[str, str]:
     if selected.empty:
         return {}
 
-    aliases = {}
+    aliases: dict[str, list[str]] = {}
     alias_col = selected.columns[1] if len(selected.columns) > 1 else None
     for _, row in selected.iterrows():
         code = _normalize_diag_codes(pd.Series([row.iloc[0]])).iloc[0]
         if pd.isna(code) or not code:
             continue
         alias = _normalize_feature_name(row[alias_col], fallback=code) if alias_col else code
-        aliases[code] = alias
+        code_aliases = aliases.setdefault(code, [])
+        if alias not in code_aliases:
+            code_aliases.append(alias)
     return aliases
+
+
+def _expand_selected_code_aliases(
+    df: pd.DataFrame,
+    selected_codes: dict[str, list[str]],
+    code_col: str = "DIAG_CODE",
+) -> pd.DataFrame:
+    if not selected_codes:
+        return df.iloc[0:0].copy()
+
+    mapping = pd.DataFrame(
+        [
+            (source_code, alias)
+            for source_code, aliases in selected_codes.items()
+            for alias in aliases
+        ],
+        columns=[code_col, "_DIAG_OUTPUT_ALIAS"],
+    )
+    out = df.merge(mapping, on=code_col, how="inner")
+    if out.empty:
+        return out.drop(columns=["_DIAG_OUTPUT_ALIAS"], errors="ignore")
+
+    out[code_col] = out["_DIAG_OUTPUT_ALIAS"]
+    return out.drop(columns=["_DIAG_OUTPUT_ALIAS"])
 
 
 def _normalize_diag_codes(values: pd.Series) -> pd.Series:

@@ -158,7 +158,7 @@ Fitxers de seleccio:
 | `selections/selected_rs.csv` | `RS` | Si existeix i conte valors, limita les columnes `DIAG_TOTAL_RS_*` i `DIAG_RS_<codi_o_grup>_<RS>` a aquestes RS. Es el mateix fitxer compartit amb demanda. |
 | `selections/selected_up.csv` | `UP` | Si existeix i conte valors, limita les columnes `DIAG_TOTAL_UP_*` i `DIAG_UP_<codi_o_grup>_<UP>` a aquestes UP. Es el mateix fitxer compartit amb demanda. |
 
-Els CSV de RS i UP son d'una sola columna. El CSV de diagnostics pot tenir una segona columna `feature_name`. Si `feature_name` esta buida, el nom de variable sera el codi ICD10 normalitzat. Si diversos codis tenen el mateix `feature_name`, el pipeline els suma en una sola variable.
+Els CSV de RS i UP son d'una sola columna. El CSV de diagnostics pot tenir una segona columna `feature_name`. Si `feature_name` esta buida, el nom de variable sera el codi ICD10 normalitzat. Si diversos codis tenen el mateix `feature_name`, el pipeline els suma en una sola variable. El mateix codi diagnostic pot aparèixer en diverses files: en aquest cas contribueix a totes les variables indicades.
 
 Exemple sense agrupacions:
 
@@ -180,6 +180,17 @@ I10,HIPERTENSIO
 ```
 
 Aquest exemple genera columnes com `DIAG_CODE_RESPIRATORI`, `DIAG_RS_RESPIRATORI_BARCELONA` i `DIAG_UP_RESPIRATORI_00001`, on `RESPIRATORI` suma `J00`, `J02` i `J03`.
+
+Exemple mantenint un codi individual i, alhora, afegint-lo a un grup:
+
+```csv
+ICD10_3,feature_name
+J00
+J00,RESPIRATORI
+J02,RESPIRATORI
+```
+
+Aquest cas genera tant `DIAG_CODE_J00` com `DIAG_CODE_RESPIRATORI`. Els casos `J00` compten a totes dues variables, i `J02` nomes a `RESPIRATORI`.
 
 ```csv
 RS
