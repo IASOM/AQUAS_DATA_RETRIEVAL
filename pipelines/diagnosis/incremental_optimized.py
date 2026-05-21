@@ -193,8 +193,8 @@ def _load_selection_values(
 
 def _load_selected_codes(
     selected_codes_file: Optional[str | Path],
-) -> Optional[dict[str, str]]:
-    """Load selected diagnosis-code prefixes mapped to output feature aliases."""
+) -> Optional[dict[str, list[str]]]:
+    """Load selected diagnosis-code prefixes mapped to one or more aliases."""
     candidates = []
     if selected_codes_file:
         active_path = Path(selected_codes_file)
@@ -236,7 +236,7 @@ def _load_selected_codes(
             logger.warning(f"Selected diagnosis codes file is empty: {path}")
             continue
 
-        code_aliases = {}
+        code_aliases: dict[str, list[str]] = {}
         alias_col = selected_df.columns[1] if len(selected_df.columns) > 1 else None
         for _, row in selected_df.iterrows():
             code_series = _normalize_diag_codes(pd.Series([row.iloc[0]]))
@@ -251,16 +251,22 @@ def _load_selected_codes(
                 if alias_col is not None
                 else code
             )
-            code_aliases[code] = alias
+            aliases = code_aliases.setdefault(code, [])
+            if alias not in aliases:
+                aliases.append(alias)
 
         if not code_aliases:
             logger.warning(f"Selected diagnosis codes file has no usable codes: {path}")
             continue
 
-        alias_count = len(set(code_aliases.values()))
+        mapping_count = sum(len(aliases) for aliases in code_aliases.values())
+        alias_count = len(
+            {alias for aliases in code_aliases.values() for alias in aliases}
+        )
         logger.info(
-            f"Loaded {len(code_aliases)} selected diagnosis codes as "
-            f"{alias_count} output groups from {path}"
+            f"Loaded {len(code_aliases)} selected diagnosis codes with "
+            f"{mapping_count} code-to-output mappings as {alias_count} "
+            f"output groups from {path}"
         )
         return code_aliases
 
@@ -275,6 +281,31 @@ def _load_selected_codes(
             "selections/selected_diagnosis_codes.csv."
         )
     return None
+
+
+def _expand_selected_code_aliases(
+    df: pd.DataFrame,
+    selected_codes: dict[str, list[str]],
+    code_col: str = "DIAG_CODE",
+) -> pd.DataFrame:
+    """Duplicate selected code rows once per requested output alias."""
+    if not selected_codes:
+        return df.iloc[0:0].copy()
+
+    mapping = pd.DataFrame(
+        [
+            (source_code, alias)
+            for source_code, aliases in selected_codes.items()
+            for alias in aliases
+        ],
+        columns=[code_col, "_DIAG_OUTPUT_ALIAS"],
+    )
+    out = df.merge(mapping, on=code_col, how="inner")
+    if out.empty:
+        return out.drop(columns=["_DIAG_OUTPUT_ALIAS"], errors="ignore")
+
+    out[code_col] = out["_DIAG_OUTPUT_ALIAS"]
+    return out.drop(columns=["_DIAG_OUTPUT_ALIAS"])
 
 
 def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[str]]:
@@ -495,11 +526,10 @@ def run_incremental_diagnosis_pipeline_optimized(
             )
 
             if selected_codes:
-                code_df = df_chunk[df_chunk["DIAG_CODE"].isin(selected_codes)].copy()
-                code_df["DIAG_CODE"] = code_df["DIAG_CODE"].map(selected_codes)
+                code_df = _expand_selected_code_aliases(df_chunk, selected_codes)
                 logger.info(
                     f"Selected diagnosis-code rows for year {year}: "
-                    f"{len(code_df)} of {len(df_chunk)} aggregated rows "
+                    f"{len(code_df)} output rows from {len(df_chunk)} aggregated rows "
                     f"across {code_df['DIAG_CODE'].nunique()} output groups"
                 )
             else:
