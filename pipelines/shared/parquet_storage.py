@@ -9,6 +9,27 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+def drop_future_timestamp_rows(
+    df: pd.DataFrame,
+    timestamp_col: str = "timestamp",
+) -> pd.DataFrame:
+    """Drop rows dated after today, using tomorrow as the exclusive cutoff."""
+    if df.empty or timestamp_col not in df.columns:
+        return df
+
+    out = df.copy()
+    out[timestamp_col] = pd.to_datetime(out[timestamp_col], errors="coerce")
+    tomorrow = pd.Timestamp.today().normalize() + pd.Timedelta(days=1)
+    before = len(out)
+    out = out[out[timestamp_col].notna() & (out[timestamp_col] < tomorrow)]
+    dropped = before - len(out)
+    if dropped:
+        logger.warning(
+            f"Dropped {dropped} rows beyond today's date from parquet output"
+        )
+    return out
+
+
 class ParquetIncrementalManager:
     """Efficiently manage partial incremental data in Parquet format."""
 
@@ -56,6 +77,10 @@ class ParquetIncrementalManager:
             df[timestamp_col] = pd.Timestamp.now()
 
         df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+        df = drop_future_timestamp_rows(df, timestamp_col)
+        if df.empty:
+            logger.warning("No rows on or before today - skipping")
+            return
 
         # Optimize data types for storage
         df = self._optimize_dtypes(df)
@@ -189,11 +214,11 @@ class ParquetIncrementalManager:
         return df
 
     def get_last_timestamp(self, timestamp_col: str = "timestamp") -> Optional[pd.Timestamp]:
-        """Get the latest timestamp from current incremental files."""
+        """Get the latest processed timestamp from incremental metadata."""
         try:
             df = pd.read_parquet(self.metadata_file)
             if not df.empty:
-                return df["max_timestamp"].iloc[-1]
+                return pd.to_datetime(df["max_timestamp"].iloc[-1], errors="coerce")
         except Exception:
             pass
         return None
@@ -232,6 +257,11 @@ class ParquetFinalStore:
         elif df.index.name is not None:
             df = df.reset_index()
 
+        df = drop_future_timestamp_rows(df, index_col)
+        if df.empty:
+            logger.warning("No final rows on or before today - skipping save")
+            return
+
         # Optimize dtypes before saving
         df = self._optimize_dtypes(df)
 
@@ -262,6 +292,26 @@ class ParquetFinalStore:
         except Exception as e:
             logger.error(f"Error loading final file: {e}")
             return pd.DataFrame()
+
+    def get_last_timestamp(self, timestamp_col: str = "timestamp") -> Optional[pd.Timestamp]:
+        """Get the latest timestamp stored in the final parquet file."""
+        if not self.output_file.exists():
+            return None
+
+        try:
+            df = pd.read_parquet(self.output_file, columns=[timestamp_col])
+        except Exception as e:
+            logger.warning(f"Could not read final timestamp from {self.output_file}: {e}")
+            return None
+
+        if df.empty or timestamp_col not in df.columns:
+            return None
+
+        timestamps = pd.to_datetime(df[timestamp_col], errors="coerce").dropna()
+        if timestamps.empty:
+            return None
+
+        return timestamps.max()
 
     def _optimize_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
         """Optimize data types for efficient storage."""
@@ -353,6 +403,7 @@ def load_and_merge_final_outputs(
     # Sort by timestamp
     if timestamp_col in merged.columns:
         merged = merged.sort_values(timestamp_col)
+        merged = drop_future_timestamp_rows(merged, timestamp_col)
 
     logger.info(f"Merged final output: {len(merged)} rows, {len(merged.columns)} columns")
 

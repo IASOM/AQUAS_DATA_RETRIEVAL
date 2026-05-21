@@ -1,10 +1,18 @@
 ﻿"""Optimized diagnosis pipeline main runner with Parquet storage."""
 import pandas as pd
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
-from pipelines.shared import get_connection, setup_logging, get_min_max_date, get_year_ranges
+from pipelines.shared import (
+    get_connection,
+    setup_logging,
+    get_min_max_date,
+    get_year_ranges,
+    get_incremental_processing_window,
+    latest_timestamp,
+)
 from pipelines.shared.parquet_storage import ParquetIncrementalManager, ParquetFinalStore
 from .aggregation_optimized import (
     build_daily_diagnosis_counts_optimized,
@@ -108,6 +116,19 @@ def _normalize_rs_values(values: pd.Series) -> pd.Series:
     return values.astype("string").str.strip().str.upper()
 
 
+def _normalize_feature_name(value, fallback: str) -> str:
+    """Build a stable column-name token from an optional human label."""
+    if pd.isna(value):
+        return fallback
+
+    token = str(value).strip()
+    if not token:
+        return fallback
+
+    token = re.sub(r"[^0-9A-Za-z]+", "_", token).strip("_").upper()
+    return token or fallback
+
+
 def _load_selection_values(
     selection_file: Optional[str | Path],
     filename: str,
@@ -170,16 +191,90 @@ def _load_selection_values(
     return None
 
 
-def _load_selected_codes(selected_codes_file: Optional[str | Path]) -> Optional[set[str]]:
-    """Load selected diagnosis-code prefixes."""
-    return _load_selection_values(
-        selection_file=selected_codes_file,
-        filename="selected_diagnosis_codes.csv",
-        label="diagnosis codes",
-        normalizer=_normalize_diag_codes,
-        legacy_filename="selected_codes.csv",
-        legacy_subdir="selected_codes",
+def _load_selected_codes(
+    selected_codes_file: Optional[str | Path],
+) -> Optional[dict[str, str]]:
+    """Load selected diagnosis-code prefixes mapped to output feature aliases."""
+    candidates = []
+    if selected_codes_file:
+        active_path = Path(selected_codes_file)
+        candidates.append(active_path)
+        resolved = active_path.resolve()
+        for parent_index in (1, 3):
+            try:
+                base_dir = resolved.parents[parent_index]
+            except IndexError:
+                continue
+            candidates.append(base_dir / "selections" / "selected_diagnosis_codes.csv")
+            candidates.append(
+                base_dir
+                / "diagnosis_pipeline"
+                / "selected_codes"
+                / "selected_codes.csv"
+            )
+
+    candidates.append(Path.cwd() / "selections" / "selected_diagnosis_codes.csv")
+    candidates.append(
+        Path.cwd() / "diagnosis_pipeline" / "selected_codes" / "selected_codes.csv"
     )
+
+    seen = set()
+    found_file = False
+    for path in candidates:
+        path = Path(path)
+        path_key = path.resolve()
+        if path_key in seen:
+            continue
+        seen.add(path_key)
+
+        if not path.exists():
+            continue
+
+        found_file = True
+        selected_df = pd.read_csv(path)
+        if selected_df.empty:
+            logger.warning(f"Selected diagnosis codes file is empty: {path}")
+            continue
+
+        code_aliases = {}
+        alias_col = selected_df.columns[1] if len(selected_df.columns) > 1 else None
+        for _, row in selected_df.iterrows():
+            code_series = _normalize_diag_codes(pd.Series([row.iloc[0]]))
+            if code_series.empty or pd.isna(code_series.iloc[0]):
+                continue
+            code = str(code_series.iloc[0])
+            if not code:
+                continue
+
+            alias = (
+                _normalize_feature_name(row[alias_col], fallback=code)
+                if alias_col is not None
+                else code
+            )
+            code_aliases[code] = alias
+
+        if not code_aliases:
+            logger.warning(f"Selected diagnosis codes file has no usable codes: {path}")
+            continue
+
+        alias_count = len(set(code_aliases.values()))
+        logger.info(
+            f"Loaded {len(code_aliases)} selected diagnosis codes as "
+            f"{alias_count} output groups from {path}"
+        )
+        return code_aliases
+
+    if found_file:
+        logger.info(
+            "No selected diagnosis codes configured in "
+            "selections/selected_diagnosis_codes.csv."
+        )
+    else:
+        logger.warning(
+            "No selected diagnosis codes file found. Expected "
+            "selections/selected_diagnosis_codes.csv."
+        )
+    return None
 
 
 def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[str]]:
@@ -230,6 +325,8 @@ def run_incremental_diagnosis_pipeline_optimized(
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
     retention_days: Optional[int] = None,
+    start_date: Optional[str | pd.Timestamp] = None,
+    end_date: Optional[str | pd.Timestamp] = None,
 ) -> None:
     """
     Run optimized incremental diagnosis pipeline with Parquet storage.
@@ -252,6 +349,8 @@ def run_incremental_diagnosis_pipeline_optimized(
         min_valid_date: Minimum date to process
         retention_days: Days of incremental data to keep. None keeps all history,
             which is required when rebuilding final daily files from 2008 onward.
+        start_date: Optional inclusive start day. If provided, overrides resume.
+        end_date: Optional inclusive end day. Defaults to today when omitted.
     """
     logger.info("Starting optimized diagnosis pipeline...")
 
@@ -267,9 +366,14 @@ def run_incremental_diagnosis_pipeline_optimized(
     selected_rs = _load_selected_rs(selected_rs_file)
     selected_up = _load_selected_up(selected_up_file)
 
-    # Get last processed date
-    last_loaded_date = incremental_mgr.get_last_timestamp()
-    logger.info(f"Last processed: {last_loaded_date}")
+    # Get last processed day from metadata, with final parquet as a fallback.
+    metadata_last_date = incremental_mgr.get_last_timestamp()
+    final_last_date = final_store.get_last_timestamp()
+    last_loaded_date = latest_timestamp(metadata_last_date, final_last_date)
+    logger.info(
+        f"Last processed day: {last_loaded_date} "
+        f"(metadata={metadata_last_date}, final={final_last_date})"
+    )
 
     # Connect to database
     conn = get_connection(db_server, db_database, auth_mode=auth_mode)
@@ -296,20 +400,34 @@ def run_incremental_diagnosis_pipeline_optimized(
             logger.info("No valid data in source table")
             return
 
-        # Adjust to today
-        today_date = pd.Timestamp.today().normalize()
-        if max_date > today_date:
-            max_date = today_date
+        window = get_incremental_processing_window(
+            min_date=min_date,
+            max_date=max_date,
+            last_processed_date=last_loaded_date,
+            requested_start_date=start_date,
+            requested_end_date=end_date,
+        )
+        if window is None:
+            logger.info("No new diagnosis days to process on or before today")
+            return
 
-        start_date = min_date if last_loaded_date is None else last_loaded_date
-        logger.info(f"Processing range: {start_date} -> {max_date}")
+        start_date, end_exclusive, max_process_day = window
+        logger.info(
+            f"Processing new diagnosis days: {start_date.date()} -> "
+            f"{max_process_day.date()}"
+        )
 
         # Process by year for memory efficiency
-        year_ranges = get_year_ranges(start_date, max_date)
+        year_ranges = get_year_ranges(start_date, max_process_day)
         global_max_loaded = last_loaded_date
 
         for year, year_start, year_end in year_ranges:
             logger.info(f"Processing diagnosis year {year}")
+            effective_year_start = max(year_start, start_date)
+            effective_year_end = min(year_end, end_exclusive)
+            if effective_year_end <= effective_year_start:
+                logger.info(f"No diagnosis data on or before today for year {year}")
+                continue
 
             # Query data efficiently
             df_chunk = get_diagnosis_data_for_year_optimized(
@@ -319,9 +437,9 @@ def run_incremental_diagnosis_pipeline_optimized(
                 date_column=date_column,
                 up_column=up_column,
                 diag_code_column=diag_code_column,
-                year_start=year_start,
-                year_end=year_end,
-                last_loaded_date=last_loaded_date,
+                year_start=effective_year_start,
+                year_end=effective_year_end,
+                last_loaded_date=None,
             )
 
             if df_chunk.empty:
@@ -340,6 +458,11 @@ def run_incremental_diagnosis_pipeline_optimized(
             # Prepare data
             df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"]).dt.floor("D")
             df_chunk = df_chunk.dropna(subset=["timestamp"])
+            df_chunk = df_chunk[df_chunk["timestamp"] < end_exclusive].copy()
+            if df_chunk.empty:
+                logger.info(f"No diagnosis rows on or before today for year {year}")
+                continue
+
             df_chunk[up_column] = _normalize_up_codes(df_chunk[up_column])
             df_chunk["n"] = pd.to_numeric(df_chunk["n"], errors="coerce").fillna(0)
 
@@ -373,9 +496,11 @@ def run_incremental_diagnosis_pipeline_optimized(
 
             if selected_codes:
                 code_df = df_chunk[df_chunk["DIAG_CODE"].isin(selected_codes)].copy()
+                code_df["DIAG_CODE"] = code_df["DIAG_CODE"].map(selected_codes)
                 logger.info(
                     f"Selected diagnosis-code rows for year {year}: "
-                    f"{len(code_df)} of {len(df_chunk)} aggregated rows"
+                    f"{len(code_df)} of {len(df_chunk)} aggregated rows "
+                    f"across {code_df['DIAG_CODE'].nunique()} output groups"
                 )
             else:
                 code_df = df_chunk.iloc[0:0].copy()
@@ -444,7 +569,11 @@ def run_incremental_diagnosis_pipeline_optimized(
         conn.close()
 
 
-def run_diagnosis_pipeline_main_optimized(config) -> None:
+def run_diagnosis_pipeline_main_optimized(
+    config,
+    start_date: Optional[str | pd.Timestamp] = None,
+    end_date: Optional[str | pd.Timestamp] = None,
+) -> None:
     """Main entry point for optimized diagnosis pipeline."""
     run_incremental_diagnosis_pipeline_optimized(
         db_server=config.DB_SERVER,
@@ -463,5 +592,7 @@ def run_diagnosis_pipeline_main_optimized(config) -> None:
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
         retention_days=None,
+        start_date=start_date,
+        end_date=end_date,
     )
 

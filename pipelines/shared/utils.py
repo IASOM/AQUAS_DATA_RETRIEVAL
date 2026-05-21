@@ -128,6 +128,75 @@ def load_last_date_from_output(final_file: str | Path) -> Optional[pd.Timestamp]
     return idx.max()
 
 
+def latest_timestamp(*values: Optional[pd.Timestamp]) -> Optional[pd.Timestamp]:
+    """Return the latest valid timestamp from optional timestamp values."""
+    valid = []
+    for value in values:
+        if value is None:
+            continue
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.notna(ts):
+            valid.append(ts)
+
+    if not valid:
+        return None
+
+    return max(valid)
+
+
+def get_incremental_processing_window(
+    min_date: pd.Timestamp,
+    max_date: pd.Timestamp,
+    last_processed_date: Optional[pd.Timestamp] = None,
+    requested_start_date: Optional[pd.Timestamp] = None,
+    requested_end_date: Optional[pd.Timestamp] = None,
+    today: Optional[pd.Timestamp] = None,
+) -> Optional[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]]:
+    """
+    Resolve the daily incremental window.
+
+    If requested_start_date is provided, the explicit requested range wins.
+    Otherwise, the pipelines resume at the day after the latest processed day.
+    This avoids re-reading part of the same day when the source timestamp column
+    has hours. If nothing has been processed yet, start from min_date.
+
+    Returns:
+        (start_day, end_exclusive, max_process_day) or None when there is no
+        new day to process.
+    """
+    min_day = pd.to_datetime(min_date).normalize()
+    source_max_day = pd.to_datetime(max_date).normalize()
+    today_day = (
+        pd.Timestamp.today().normalize()
+        if today is None
+        else pd.to_datetime(today).normalize()
+    )
+    requested_end_day = (
+        None
+        if requested_end_date is None
+        else pd.to_datetime(requested_end_date).normalize()
+    )
+    max_process_day = min(
+        source_max_day,
+        today_day,
+        requested_end_day if requested_end_day is not None else today_day,
+    )
+
+    if requested_start_date is not None:
+        start_day = pd.to_datetime(requested_start_date).normalize()
+    elif last_processed_date is None or pd.isna(last_processed_date):
+        start_day = min_day
+    else:
+        start_day = pd.to_datetime(last_processed_date).normalize() + pd.Timedelta(days=1)
+
+    start_day = max(start_day, min_day)
+    end_exclusive = max_process_day + pd.Timedelta(days=1)
+    if start_day >= end_exclusive:
+        return None
+
+    return start_day, end_exclusive, max_process_day
+
+
 def get_min_max_date(
     conn: pyodbc.Connection,
     schema: str,

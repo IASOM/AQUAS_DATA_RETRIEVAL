@@ -366,7 +366,12 @@ def _merge_with_existing_final(
     existing_idx = existing_df.set_index(timestamp_col)
     new_idx = new_df.set_index(timestamp_col)
 
-    combined = new_idx.combine_first(existing_idx).sort_index().fillna(0)
+    # Replace complete overlapping days with the new aggregate. This avoids
+    # double-counting and prevents stale values from surviving in columns that
+    # are absent from a recomputed day.
+    existing_idx = existing_idx[~existing_idx.index.isin(new_idx.index)]
+    combined = pd.concat([existing_idx, new_idx], axis=0, sort=False)
+    combined = combined.sort_index().fillna(0)
     combined.index.name = timestamp_col
     return combined.reset_index()
 
