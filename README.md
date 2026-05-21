@@ -465,9 +465,6 @@ Per executar els pipelines reals cal tenir `.env`, ODBC i permisos de base de da
 
 ## Notes de manteniment
 
-- `src/` es codi legacy amb rutes absolutes antigues i duplicacio de logica. No es la via recomanada.
-- `check_columns.py` encara importa configuracio legacy de `src/diagnosis`. Es pot migrar a `config/config.py` o eliminar si ja no es fa servir.
-- `src/daily_run.py` conte errors de runtime evidents (`df.combined`, `df_copmbined`, `args.run_now`) i rutes absolutes antigues. No s'hauria d'usar sense refactor.
 - `data/` conte sortides generades i actualment esta versionat. Si les dades son grans, sensibles o reproduibles, convindria treure-les del control de versions i ignorar `data/`.
 - Hi ha dues convencions de nom per l'Excel de mapping: `UPperRS.xlsx` i `UP per RS.xlsx`. La configuracio actual utilitza `UPperRS.xlsx`; millor mantenir una sola copia canonica.
 - L'agregacio optimitzada fusiona els incrementals nous amb el Parquet final existent abans de sobreescriure'l. Tot i aixo, si canvieu l'esquema de columnes, valideu que el final conservi totes les variables esperades per dia.
