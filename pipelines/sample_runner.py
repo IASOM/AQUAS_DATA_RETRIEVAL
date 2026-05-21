@@ -18,6 +18,7 @@ from pipelines.diagnosis.aggregation_optimized import (
     build_diagnosis_wide_format_optimized,
 )
 from pipelines.shared.final_joiner import FinalDataJoiner
+from pipelines.shared.parquet_storage import drop_future_timestamp_rows
 
 
 SAMPLE_INPUT_FILES = {
@@ -28,7 +29,12 @@ SAMPLE_INPUT_FILES = {
 }
 
 
-def run_sample_demand_pipeline(input_dir: str | Path, output_dir: str | Path) -> Path:
+def run_sample_demand_pipeline(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    start_date: pd.Timestamp | None = None,
+    end_date: pd.Timestamp | None = None,
+) -> Path:
     """Run the demand pipeline with local synthetic input data."""
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -41,6 +47,8 @@ def run_sample_demand_pipeline(input_dir: str | Path, output_dir: str | Path) ->
     )
 
     visits = prepare_visits_chunk(visits, up_rs=up_rs)
+    visits = _filter_by_date_range(visits, "DATA_VISITA", start_date, end_date)
+    visits = visits[visits["DATA_VISITA"] < _tomorrow()].copy()
     visits["timestamp"] = visits["DATA_VISITA"]
 
     cat_daily = build_daily_total_cat_optimized(visits)
@@ -60,7 +68,12 @@ def run_sample_demand_pipeline(input_dir: str | Path, output_dir: str | Path) ->
     return final_path
 
 
-def run_sample_diagnosis_pipeline(input_dir: str | Path, output_dir: str | Path) -> Path:
+def run_sample_diagnosis_pipeline(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    start_date: pd.Timestamp | None = None,
+    end_date: pd.Timestamp | None = None,
+) -> Path:
     """Run the diagnosis pipeline with local synthetic input data."""
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -73,14 +86,18 @@ def run_sample_diagnosis_pipeline(input_dir: str | Path, output_dir: str | Path)
     )
     selected_codes = _load_selected_codes(input_dir)
 
+    diagnosis["problema_salut_c"] = _normalize_diag_codes(diagnosis["problema_salut_c"])
     if selected_codes:
         diagnosis = diagnosis[diagnosis["problema_salut_c"].isin(selected_codes)].copy()
+        diagnosis["problema_salut_c"] = diagnosis["problema_salut_c"].map(selected_codes)
 
     diagnosis["timestamp"] = pd.to_datetime(
         diagnosis["data_visita"],
         errors="coerce",
     ).dt.floor("D")
     diagnosis = diagnosis.dropna(subset=["timestamp"])
+    diagnosis = _filter_by_date_range(diagnosis, "timestamp", start_date, end_date)
+    diagnosis = diagnosis[diagnosis["timestamp"] < _tomorrow()].copy()
     diagnosis["up_c"] = diagnosis["up_c"].astype(str).str.zfill(5)
     diagnosis["n"] = 1
     diagnosis = diagnosis.rename(columns={"problema_salut_c": "DIAG_CODE"})
@@ -148,14 +165,61 @@ def _load_up_rs(input_dir: Path) -> pd.DataFrame:
     return up_rs
 
 
-def _load_selected_codes(input_dir: Path) -> set[str]:
+def _load_selected_codes(input_dir: Path) -> dict[str, str]:
     path = input_dir / SAMPLE_INPUT_FILES["selected_codes"]
     if not path.exists():
-        return set()
+        return {}
     selected = pd.read_csv(path, dtype=str)
     if selected.empty:
-        return set()
-    return set(selected.iloc[:, 0].dropna().astype(str))
+        return {}
+
+    aliases = {}
+    alias_col = selected.columns[1] if len(selected.columns) > 1 else None
+    for _, row in selected.iterrows():
+        code = _normalize_diag_codes(pd.Series([row.iloc[0]])).iloc[0]
+        if pd.isna(code) or not code:
+            continue
+        alias = _normalize_feature_name(row[alias_col], fallback=code) if alias_col else code
+        aliases[code] = alias
+    return aliases
+
+
+def _normalize_diag_codes(values: pd.Series) -> pd.Series:
+    return values.astype("string").str.strip().str.upper().str[:3]
+
+
+def _normalize_feature_name(value, fallback: str) -> str:
+    if pd.isna(value):
+        return fallback
+    token = str(value).strip()
+    if not token:
+        return fallback
+    token = "".join(char if char.isalnum() else "_" for char in token)
+    token = "_".join(part for part in token.upper().split("_") if part)
+    return token or fallback
+
+
+def _tomorrow() -> pd.Timestamp:
+    return pd.Timestamp.today().normalize() + pd.Timedelta(days=1)
+
+
+def _filter_by_date_range(
+    df: pd.DataFrame,
+    timestamp_col: str,
+    start_date: pd.Timestamp | None,
+    end_date: pd.Timestamp | None,
+) -> pd.DataFrame:
+    out = df.copy()
+    out[timestamp_col] = pd.to_datetime(out[timestamp_col], errors="coerce").dt.floor("D")
+    out = out.dropna(subset=[timestamp_col])
+
+    if start_date is not None:
+        out = out[out[timestamp_col] >= pd.to_datetime(start_date).normalize()]
+    if end_date is not None:
+        end_exclusive = pd.to_datetime(end_date).normalize() + pd.Timedelta(days=1)
+        out = out[out[timestamp_col] < end_exclusive]
+
+    return out.copy()
 
 
 def _with_timestamp_column(
@@ -179,7 +243,7 @@ def _combine_wide_frames(
     indexed = [_as_timestamp_index(frame, timestamp_col) for frame in frames]
     combined = pd.concat(indexed, axis=1).fillna(0).sort_index()
     combined.index.name = timestamp_col
-    return combined.reset_index()
+    return drop_future_timestamp_rows(combined.reset_index(), timestamp_col)
 
 
 def _as_timestamp_index(
@@ -229,5 +293,6 @@ def _pivot_diagnosis_group(
 def _save_parquet(df: pd.DataFrame, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    df = drop_future_timestamp_rows(df, "timestamp")
     df.to_parquet(path, compression="snappy", index=False)
 

@@ -4,7 +4,15 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from pipelines.shared import get_connection, setup_logging, get_min_max_date, get_year_ranges, get_data_for_year
+from pipelines.shared import (
+    get_connection,
+    setup_logging,
+    get_min_max_date,
+    get_year_ranges,
+    get_data_for_year,
+    get_incremental_processing_window,
+    latest_timestamp,
+)
 from pipelines.shared.parquet_storage import ParquetIncrementalManager, ParquetFinalStore
 from .aggregation_optimized import (
     build_daily_total_cat_optimized,
@@ -132,6 +140,8 @@ def run_incremental_pipeline_optimized(
     auth_mode: str = "ActiveDirectoryIntegrated",
     min_valid_date: str = "2008-01-01",
     retention_days: Optional[int] = None,
+    start_date: Optional[str | pd.Timestamp] = None,
+    end_date: Optional[str | pd.Timestamp] = None,
 ) -> None:
     """
     Run optimized incremental demand pipeline with Parquet storage.
@@ -151,6 +161,8 @@ def run_incremental_pipeline_optimized(
         min_valid_date: Minimum date to process
         retention_days: Days of incremental data to keep. None keeps all history,
             which is required when rebuilding final daily files from 2008 onward.
+        start_date: Optional inclusive start day. If provided, overrides resume.
+        end_date: Optional inclusive end day. Defaults to today when omitted.
     """
     logger.info("Starting optimized demand pipeline...")
 
@@ -164,9 +176,14 @@ def run_incremental_pipeline_optimized(
     selected_rs = _load_selected_rs(selected_rs_file)
     selected_up = _load_selected_up(selected_up_file)
 
-    # Get last processed date
-    last_loaded_date = incremental_mgr.get_last_timestamp()
-    logger.info(f"Last processed: {last_loaded_date}")
+    # Get last processed day from metadata, with final parquet as a fallback.
+    metadata_last_date = incremental_mgr.get_last_timestamp()
+    final_last_date = final_store.get_last_timestamp()
+    last_loaded_date = latest_timestamp(metadata_last_date, final_last_date)
+    logger.info(
+        f"Last processed day: {last_loaded_date} "
+        f"(metadata={metadata_last_date}, final={final_last_date})"
+    )
 
     # Connect to database
     conn = get_connection(db_server, db_database, auth_mode=auth_mode)
@@ -185,20 +202,34 @@ def run_incremental_pipeline_optimized(
             logger.info("No valid data in source table")
             return
 
-        # Adjust to today
-        today_date = pd.Timestamp.today().normalize()
-        if max_date > today_date:
-            max_date = today_date
+        window = get_incremental_processing_window(
+            min_date=min_date,
+            max_date=max_date,
+            last_processed_date=last_loaded_date,
+            requested_start_date=start_date,
+            requested_end_date=end_date,
+        )
+        if window is None:
+            logger.info("No new demand days to process on or before today")
+            return
 
-        start_date = min_date if last_loaded_date is None else last_loaded_date
-        logger.info(f"Processing range: {start_date} -> {max_date}")
+        start_date, end_exclusive, max_process_day = window
+        logger.info(
+            f"Processing new demand days: {start_date.date()} -> "
+            f"{max_process_day.date()}"
+        )
 
         # Process by year for memory efficiency
-        year_ranges = get_year_ranges(start_date, max_date)
+        year_ranges = get_year_ranges(start_date, max_process_day)
         global_max_loaded = last_loaded_date
 
         for year, year_start, year_end in year_ranges:
             logger.info(f"Processing year {year}")
+            effective_year_start = max(year_start, start_date)
+            effective_year_end = min(year_end, end_exclusive)
+            if effective_year_end <= effective_year_start:
+                logger.info(f"No demand data on or before today for year {year}")
+                continue
 
             # Query data efficiently
             df_chunk = get_data_for_year(
@@ -206,9 +237,9 @@ def run_incremental_pipeline_optimized(
                 schema=schema,
                 table_name=table_name,
                 date_column=date_column,
-                year_start=year_start,
-                year_end=year_end,
-                last_loaded_date=last_loaded_date,
+                year_start=effective_year_start,
+                year_end=effective_year_end,
+                last_loaded_date=None,
                 selected_cols=[
                     "DATA_VISITA",
                     "UP",
@@ -228,6 +259,10 @@ def run_incremental_pipeline_optimized(
 
             # Transform chunk
             df_chunk = prepare_visits_chunk(df_chunk, up_rs=up_rs)
+            df_chunk = df_chunk[df_chunk["DATA_VISITA"] < end_exclusive].copy()
+            if df_chunk.empty:
+                logger.info(f"No demand rows on or before today for year {year}")
+                continue
 
             # Rename timestamp column for consistency
             df_chunk["timestamp"] = df_chunk["DATA_VISITA"]
@@ -282,7 +317,11 @@ def run_incremental_pipeline_optimized(
         conn.close()
 
 
-def run_demand_pipeline_main_optimized(config) -> None:
+def run_demand_pipeline_main_optimized(
+    config,
+    start_date: Optional[str | pd.Timestamp] = None,
+    end_date: Optional[str | pd.Timestamp] = None,
+) -> None:
     """Main entry point for optimized demand pipeline."""
     run_incremental_pipeline_optimized(
         db_server=config.DB_SERVER,
@@ -298,5 +337,7 @@ def run_demand_pipeline_main_optimized(config) -> None:
         auth_mode=config.AUTH_MODE,
         min_valid_date=config.MIN_VALID_DATE,
         retention_days=None,
+        start_date=start_date,
+        end_date=end_date,
     )
 

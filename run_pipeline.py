@@ -7,6 +7,7 @@ delegating the actual work to ``run_pipeline_optimized.py``.
 import sys
 
 from run_pipeline_optimized import (
+    convert_parquet_file,
     join_final_outputs,
     main as _optimized_main,
     run_demand_pipeline_optimized,
@@ -14,14 +15,22 @@ from run_pipeline_optimized import (
 )
 
 
-def run_demand_pipeline(config=None):
+def run_demand_pipeline(config=None, start_date=None, end_date=None):
     """Run the demand pipeline through the optimized implementation."""
-    return run_demand_pipeline_optimized(config)
+    return run_demand_pipeline_optimized(
+        config,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
 
-def run_diagnosis_pipeline(config=None):
+def run_diagnosis_pipeline(config=None, start_date=None, end_date=None):
     """Run the diagnosis pipeline through the optimized implementation."""
-    return run_diagnosis_pipeline_optimized(config)
+    return run_diagnosis_pipeline_optimized(
+        config,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
 
 def main():

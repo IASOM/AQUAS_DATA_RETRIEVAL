@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 import warnings
 
+from .parquet_storage import drop_future_timestamp_rows
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
@@ -130,6 +132,7 @@ class FinalDataJoiner:
         # Fill any remaining nulls with 0 for numeric columns
         numeric_cols = merged.select_dtypes(include=[float, int]).columns
         merged[numeric_cols] = merged[numeric_cols].fillna(0)
+        merged = drop_future_timestamp_rows(merged, self.timestamp_col)
 
         logger.info(
             f"Joined output: {len(merged)} rows, {len(merged.columns)} columns"
