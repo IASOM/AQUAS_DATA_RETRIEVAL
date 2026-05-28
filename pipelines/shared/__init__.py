@@ -18,6 +18,12 @@ from .parquet_storage import (
     ParquetFinalStore,
     load_and_merge_final_outputs,
 )
+from .imputation import (
+    IMPUTED_COL,
+    IMPUTATION_COLUMNS,
+    drop_imputed_rows,
+    impute_tail_to_date,
+)
 from .final_joiner import FinalDataJoiner, IncrementalFinalJoiner
 
 
@@ -45,6 +51,10 @@ __all__ = [
     "ParquetIncrementalManager",
     "ParquetFinalStore",
     "load_and_merge_final_outputs",
+    "IMPUTED_COL",
+    "IMPUTATION_COLUMNS",
+    "drop_imputed_rows",
+    "impute_tail_to_date",
     "FinalDataJoiner",
     "IncrementalFinalJoiner",
 ]

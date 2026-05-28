@@ -6,6 +6,8 @@ from typing import Optional, Tuple
 import logging
 from uuid import uuid4
 
+from .imputation import IMPUTED_COL, is_imputed_series
+
 logger = logging.getLogger(__name__)
 
 
@@ -294,18 +296,24 @@ class ParquetFinalStore:
             return pd.DataFrame()
 
     def get_last_timestamp(self, timestamp_col: str = "timestamp") -> Optional[pd.Timestamp]:
-        """Get the latest timestamp stored in the final parquet file."""
+        """Get the latest non-imputed timestamp stored in the final parquet file."""
         if not self.output_file.exists():
             return None
 
         try:
-            df = pd.read_parquet(self.output_file, columns=[timestamp_col])
-        except Exception as e:
-            logger.warning(f"Could not read final timestamp from {self.output_file}: {e}")
-            return None
+            df = pd.read_parquet(self.output_file, columns=[timestamp_col, IMPUTED_COL])
+        except Exception:
+            try:
+                df = pd.read_parquet(self.output_file, columns=[timestamp_col])
+            except Exception as e:
+                logger.warning(f"Could not read final timestamp from {self.output_file}: {e}")
+                return None
 
         if df.empty or timestamp_col not in df.columns:
             return None
+
+        if IMPUTED_COL in df.columns:
+            df = df[~is_imputed_series(df[IMPUTED_COL])]
 
         timestamps = pd.to_datetime(df[timestamp_col], errors="coerce").dropna()
         if timestamps.empty:

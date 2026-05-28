@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Optional
 import logging
 
+from pipelines.shared.imputation import (
+    IMPUTATION_COLUMNS,
+    drop_imputed_rows,
+    impute_tail_to_date,
+)
+
 logger = logging.getLogger(__name__)
 MAX_DIAGNOSIS_FEATURES = int(os.getenv("MAX_DIAGNOSIS_FEATURES", "200000"))
 
@@ -260,6 +266,8 @@ def aggregate_diagnosis_final_optimized(
     timestamp_col: str = "timestamp",
     with_range: Optional[tuple] = None,
     clear_incremental: bool = True,
+    observed_until: Optional[pd.Timestamp] = None,
+    impute_until: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Efficiently aggregate incremental diagnosis data to final output.
@@ -307,6 +315,14 @@ def aggregate_diagnosis_final_optimized(
     df = _combine_diagnosis_wide_parts(parts, timestamp_col)
     df = _merge_with_existing_diagnosis_final(df, final_store, timestamp_col)
 
+    if impute_until is not None:
+        df = impute_tail_to_date(
+            df,
+            observed_until=observed_until,
+            target_until=impute_until,
+            timestamp_col=timestamp_col,
+        )
+
     # Save final
     final_store.save_final(df, index_col=timestamp_col)
 
@@ -315,6 +331,27 @@ def aggregate_diagnosis_final_optimized(
 
     logger.info(f"Aggregated diagnosis final: {len(df)} rows")
 
+    return df
+
+
+def refresh_diagnosis_final_imputation(
+    final_store,
+    observed_until: Optional[pd.Timestamp],
+    impute_until: Optional[pd.Timestamp],
+    timestamp_col: str = "timestamp",
+) -> pd.DataFrame:
+    """Refresh tail imputations when there are no new source rows to aggregate."""
+    existing_df = final_store.load_final()
+    if existing_df.empty or impute_until is None:
+        return existing_df
+
+    df = impute_tail_to_date(
+        existing_df,
+        observed_until=observed_until,
+        target_until=impute_until,
+        timestamp_col=timestamp_col,
+    )
+    final_store.save_final(df, index_col=timestamp_col)
     return df
 
 
@@ -353,9 +390,12 @@ def _build_diagnosis_wide_final(
         col
         for col in out.columns
         if (
-            col == "DIAG_TOTAL"
-            or col.startswith("DIAG_TOTAL_")
-            or col.startswith("DIAG_CODE_")
+            col not in IMPUTATION_COLUMNS
+            and (
+                col == "DIAG_TOTAL"
+                or col.startswith("DIAG_TOTAL_")
+                or col.startswith("DIAG_CODE_")
+            )
         )
     ]
     if wide_cols:
@@ -492,6 +532,10 @@ def _merge_with_existing_diagnosis_final(
 ) -> pd.DataFrame:
     """Merge new diagnosis final rows with the existing final parquet."""
     existing_df = final_store.load_final()
+    if existing_df.empty:
+        return new_df
+
+    existing_df = drop_imputed_rows(existing_df, timestamp_col=timestamp_col)
     if existing_df.empty:
         return new_df
 

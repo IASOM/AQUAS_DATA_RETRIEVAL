@@ -6,6 +6,12 @@ from typing import Optional
 import logging
 from datetime import datetime
 
+from pipelines.shared.imputation import (
+    IMPUTATION_COLUMNS,
+    drop_imputed_rows,
+    impute_tail_to_date,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -254,6 +260,8 @@ def aggregate_final_optimized(
     timestamp_col: str = "timestamp",
     with_range: Optional[tuple] = None,
     clear_incremental: bool = True,
+    observed_until: Optional[pd.Timestamp] = None,
+    impute_until: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Efficiently aggregate incremental data to final output.
@@ -301,12 +309,41 @@ def aggregate_final_optimized(
     df = _combine_wide_parts(parts, timestamp_col)
     df = _merge_with_existing_final(df, final_store, timestamp_col)
 
+    if impute_until is not None:
+        df = impute_tail_to_date(
+            df,
+            observed_until=observed_until,
+            target_until=impute_until,
+            timestamp_col=timestamp_col,
+        )
+
     # Save final
     final_store.save_final(df, index_col=timestamp_col)
 
     if clear_incremental:
         incremental_manager.clear_incremental_files()
 
+    return df
+
+
+def refresh_final_imputation(
+    final_store,
+    observed_until: Optional[pd.Timestamp],
+    impute_until: Optional[pd.Timestamp],
+    timestamp_col: str = "timestamp",
+) -> pd.DataFrame:
+    """Refresh tail imputations when there are no new source rows to aggregate."""
+    existing_df = final_store.load_final()
+    if existing_df.empty or impute_until is None:
+        return existing_df
+
+    df = impute_tail_to_date(
+        existing_df,
+        observed_until=observed_until,
+        target_until=impute_until,
+        timestamp_col=timestamp_col,
+    )
+    final_store.save_final(df, index_col=timestamp_col)
     return df
 
 
@@ -340,7 +377,11 @@ def _build_wide_final_by_timestamp(
 
     out[timestamp_col] = pd.to_datetime(out[timestamp_col]).dt.floor("D")
 
-    value_cols = [col for col in out.columns if col != timestamp_col]
+    value_cols = [
+        col
+        for col in out.columns
+        if col != timestamp_col and col not in IMPUTATION_COLUMNS
+    ]
     out[value_cols] = out[value_cols].apply(pd.to_numeric, errors="coerce")
 
     return (
@@ -361,6 +402,10 @@ def _merge_with_existing_final(
     if existing_df.empty:
         return new_df
 
+    existing_df = drop_imputed_rows(existing_df, timestamp_col=timestamp_col)
+    if existing_df.empty:
+        return new_df
+
     existing_df = _build_wide_final_by_timestamp(existing_df, timestamp_col)
 
     existing_idx = existing_df.set_index(timestamp_col)
@@ -374,4 +419,3 @@ def _merge_with_existing_final(
     combined = combined.sort_index().fillna(0)
     combined.index.name = timestamp_col
     return combined.reset_index()
-

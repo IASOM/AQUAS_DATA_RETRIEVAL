@@ -38,6 +38,8 @@ data/finals/demand_diagnosis_joined.parquet
 
 Regla de dates: els incrementals, els finals i el fitxer unit no han de contenir files posteriors a avui. Les consultes fan servir de tall de fi el principi de dema, de manera que inclouen tot el dia d'avui pero exclouen qualsevol data futura. L'escriptura Parquet tambe elimina files futures si arriben per error.
 
+Si la taula origen encara no ha carregat dades fins avui, les sortides finals s'allarguen fins avui amb valors imputats. Aquests dies es marquen amb `__is_imputed = True`, `__imputation_method`, `__imputation_source_last_date` i `__imputation_created_at`. La imputacio fa servir la mitjana historica del mateix dia i mes en anys anteriors, amb mitjana global de la columna com a fallback. En una execucio posterior, quan les dades reals ja existeixin al servidor, aquestes files imputades no compten com a dades processades i es substitueixen pels valors reals.
+
 ## Estructura actual
 
 ```text
@@ -491,6 +493,5 @@ Prioritat mitjana:
 - Unificar documentacio dispersa (`QUICKSTART.md`, `PROJECT_STRUCTURE.md`, `MIGRATION.md`, `OPTIMIZED_PIPELINE.md`, etc.) o marcar clarament quina documentacio es historica.
 - Fer que `check_columns.py` reutilitzi la configuracio central.
 - Afegir tests petits per transformacions i agregacions abans de tocar l'esquema de sortida.
-
 
 

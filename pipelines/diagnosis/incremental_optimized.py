@@ -20,6 +20,7 @@ from .aggregation_optimized import (
     build_daily_total_by_group_optimized,
     build_daily_total_general_optimized,
     aggregate_diagnosis_final_optimized,
+    refresh_diagnosis_final_imputation,
     _build_diagnosis_wide_final,
 )
 
@@ -431,6 +432,14 @@ def run_incremental_diagnosis_pipeline_optimized(
             logger.info("No valid data in source table")
             return
 
+        today_day = pd.Timestamp.today().normalize()
+        requested_end_day = (
+            today_day
+            if end_date is None
+            else min(pd.to_datetime(end_date).normalize(), today_day)
+        )
+        source_observed_until = min(pd.to_datetime(max_date).normalize(), requested_end_day)
+
         window = get_incremental_processing_window(
             min_date=min_date,
             max_date=max_date,
@@ -440,6 +449,11 @@ def run_incremental_diagnosis_pipeline_optimized(
         )
         if window is None:
             logger.info("No new diagnosis days to process on or before today")
+            refresh_diagnosis_final_imputation(
+                final_store,
+                observed_until=source_observed_until,
+                impute_until=requested_end_day,
+            )
             return
 
         start_date, end_exclusive, max_process_day = window
@@ -591,7 +605,12 @@ def run_incremental_diagnosis_pipeline_optimized(
 
         # Aggregate to final
         logger.info("Aggregating diagnosis to final output...")
-        aggregate_diagnosis_final_optimized(incremental_mgr, final_store)
+        aggregate_diagnosis_final_optimized(
+            incremental_mgr,
+            final_store,
+            observed_until=max_process_day,
+            impute_until=requested_end_day,
+        )
 
         logger.info("Diagnosis pipeline completed successfully")
 
@@ -625,4 +644,3 @@ def run_diagnosis_pipeline_main_optimized(
         start_date=start_date,
         end_date=end_date,
     )
-
