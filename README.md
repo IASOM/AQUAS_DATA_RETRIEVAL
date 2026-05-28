@@ -74,6 +74,9 @@ AQUAS_INTEGRATION/
     ... codi legacy
   run_pipeline.py
   run_pipeline_optimized.py
+  scripts/
+    check_source_upload_metadata.py
+    create_multiyear_sample.py
   requirements.txt
   .env.example
   UPperRS.xlsx
@@ -291,6 +294,35 @@ Veure opcions disponibles:
 python run_pipeline.py --help
 ```
 
+## Comprovar data d'upload a Synapse
+
+El script `scripts/check_source_upload_metadata.py` intenta respondre si Synapse exposa una data real de carrega o ingestio de les taules origen. No modifica dades: nomes fa consultes de lectura.
+
+```powershell
+python .\scripts\check_source_upload_metadata.py
+```
+
+Que comprova:
+
+- Acces directe a `z_inv.P1038_visites` i `z_inv.P1038_prstb015r_filtrat`.
+- Metadata de l'objecte (`create_date`, `modify_date`) des de `INFORMATION_SCHEMA` i `sys.objects`.
+- Columnes amb noms tipus `load`, `upload`, `ingest`, `refresh`, `created`, `modified`, etc.
+- Peticions recents de carrega a `sys.dm_pdw_exec_requests`, si l'usuari te permis `VIEW DATABASE STATE`.
+
+Important: `modify_date` no es una data fiable d'upload de dades. En views o taules pot indicar quan es va crear o modificar l'objecte, no quan es van carregar les files. Si no hi ha columna d'auditoria ni permisos per mirar la DMV, no es pot saber exactament la darrera carrega des d'aquest codi.
+
+Si la DMV falla per permisos, es pot saltar:
+
+```powershell
+python .\scripts\check_source_upload_metadata.py --skip-dmv
+```
+
+Si el driver instal.lat te un altre nom:
+
+```powershell
+python .\scripts\check_source_upload_metadata.py --driver "ODBC Driver 17 for SQL Server"
+```
+
 ## Sortides
 
 | Fitxer | Contingut |
@@ -306,6 +338,8 @@ python run_pipeline.py --help
 
 Cap sortida incremental, final o unida hauria de tenir timestamps posteriors a avui. Si el sistema origen retorna dates futures, es descarten abans d'escriure el Parquet.
 
+Les sortides finals poden contenir files imputades fins avui quan la base de dades origen encara no ha publicat dades per als darrers dies. Aquestes files es poden identificar amb les columnes de control descrites a la seccio seguent.
+
 ## Incremental diari
 
 Despres d'una primera reconstruccio historica, les execucions seguents son diaries:
@@ -319,6 +353,47 @@ Despres d'una primera reconstruccio historica, les execucions seguents son diari
 - Despres de reconstruir el final, els Parquets incrementals ja processats s'eliminen, pero la metadata queda guardada per saber on continuar.
 
 Si cal reprocessar dies antics per canvis retroactius a la base de dades, executa el rang amb `--start-date` i `--end-date`. El mode normal sense dates esta optimitzat per afegir dies nous, no per detectar modificacions historiques.
+
+## Imputacio fins avui
+
+La base de dades origen pot actualitzar-se de manera asincrona. Per exemple, avui pot ser `2026-05-28`, pero l'ultima data real disponible a Synapse pot ser `2026-05-25`. Abans aquests dies posteriors podien quedar com a zeros, cosa que feia semblar que hi havia activitat real igual a zero. Ara el pipeline els tracta com a valors no observats i els imputa.
+
+Com funciona:
+
+- El pipeline consulta dades reals nomes fins al maxim dia disponible a la taula origen, limitat per avui o per `--end-date`.
+- Despres de construir el final amb dades reals, allarga `demand_final.parquet` i `diagnosis_final.parquet` fins avui.
+- Les dates posteriors a l'ultima data real es calculen amb la mitjana historica del mateix dia i mes en anys anteriors.
+- Si una columna no te historial per aquell mateix dia i mes, usa la mitjana observada de la columna com a fallback.
+- Les files reals es marquen amb `__is_imputed = False`.
+- Les files estimades es marquen amb `__is_imputed = True`.
+
+Columnes de control afegides als finals:
+
+| Columna | Significat |
+| --- | --- |
+| `__is_imputed` | `True` si la fila es estimada, `False` si ve de dades reals |
+| `__imputation_method` | Metode utilitzat, ara `same_month_day_mean` |
+| `__imputation_source_last_date` | Ultim dia real disponible quan es va fer la imputacio |
+| `__imputation_created_at` | Moment en que es va crear la imputacio |
+
+Quan la base de dades origen s'actualitza mes tard, aquestes files imputades no compten com a dades reals processades. El pipeline calcula l'ultim dia processat ignorant `__is_imputed = True`, torna a consultar els dies pendents i substitueix les estimacions pels valors reals.
+
+Exemple:
+
+```text
+Avui: 2026-05-28
+Ultima data real a Synapse: 2026-05-25
+Final escrit: fins a 2026-05-28
+Files 2026-05-26, 2026-05-27 i 2026-05-28: __is_imputed = True
+```
+
+Si el dia seguent Synapse ja conte dades fins a `2026-05-28`, una nova execucio normal:
+
+```bash
+python run_pipeline.py --all
+```
+
+reprocessara `2026-05-26` -> `2026-05-28` amb valors reals i eliminara les estimacions d'aquells dies.
 
 ## Dades sintetiques
 
@@ -431,6 +506,17 @@ Gestiona incrementals Parquet, metadades, retencio opcional de fitxers antics i 
 
 Abans de guardar incrementals o finals, elimina qualsevol fila amb `timestamp` posterior a avui.
 
+Quan llegeix l'ultim timestamp del Parquet final, ignora les files amb `__is_imputed = True`. Aixo permet que una execucio posterior substitueixi estimacions per dades reals quan el servidor ja les tingui disponibles.
+
+### `pipelines/shared/imputation.py`
+
+Conte la logica d'imputacio de cua fins avui:
+
+- Elimina files imputades antigues abans de fusionar dades reals noves.
+- Afegeix les columnes `__is_imputed`, `__imputation_method`, `__imputation_source_last_date` i `__imputation_created_at`.
+- Calcula estimacions amb la mitjana historica del mateix dia i mes.
+- Mante separades les files observades i les estimades per poder substituir-les en futures execucions.
+
 ### `pipelines/demand/`
 
 Processa visites:
@@ -460,6 +546,10 @@ Processa diagnostics:
 ### `pipelines/shared/final_joiner.py`
 
 Uneix `demand_final.parquet` i `diagnosis_final.parquet` per `timestamp`, afegeix prefixos `DEMAND_` i `DIAGNOSIS_`, descarta timestamps futurs i desa el resultat final.
+
+### `scripts/check_source_upload_metadata.py`
+
+Script de diagnostic per comprovar si Synapse exposa alguna pista sobre la data real d'upload o ingestio de les fonts. Revisa columnes d'auditoria, metadata d'objecte i, si hi ha permisos, historial recent de peticions de carrega. No escriu res a la base de dades.
 
 ## Validacio rapida
 
