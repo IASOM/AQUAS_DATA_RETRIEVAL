@@ -67,29 +67,83 @@ def test_drop_imputed_rows_removes_estimates_and_metadata_columns():
 
 
 def test_delete_parquet_rows_removes_inclusive_date_range_and_writes_backup(tmp_path):
-    parquet_path = tmp_path / "rows.parquet"
+    parquet_path = tmp_path / "demand_pipeline" / "finals" / "demand_final.parquet"
+    metadata_path = tmp_path / "demand_pipeline" / "incremental" / "metadata.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    metadata_path.parent.mkdir(parents=True)
     pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
             "value": [1, 2, 3],
         }
     ).to_parquet(parquet_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "last_update": pd.Timestamp("2024-01-04"),
+                "min_timestamp": pd.Timestamp("2024-01-01"),
+                "max_timestamp": pd.Timestamp("2024-01-03"),
+                "num_rows": 3,
+            }
+        ]
+    ).to_parquet(metadata_path, index=False)
 
     deleted_rows, remaining_rows, backup_path = delete_parquet_rows(
         parquet_path,
-        start_date=pd.Timestamp("2024-01-02"),
-        end_date=pd.Timestamp("2024-01-02"),
+        start_date=pd.Timestamp("2024-01-03"),
+        end_date=pd.Timestamp("2024-01-03"),
     )
 
     remaining = pd.read_parquet(parquet_path)
+    metadata = pd.read_parquet(metadata_path)
     assert deleted_rows == 1
     assert remaining_rows == 2
     assert backup_path is not None
     assert Path(backup_path).exists()
     assert remaining["timestamp"].tolist() == [
         pd.Timestamp("2024-01-01"),
-        pd.Timestamp("2024-01-03"),
+        pd.Timestamp("2024-01-02"),
     ]
+    assert metadata["max_timestamp"].iloc[0] == pd.Timestamp("2024-01-02")
+
+
+def test_delete_parquet_rows_syncs_metadata_to_last_non_imputed_row(tmp_path):
+    parquet_path = tmp_path / "diagnosis_pipeline" / "finals" / "diagnosis_final.parquet"
+    metadata_path = tmp_path / "diagnosis_pipeline" / "incremental" / "metadata.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    metadata_path.parent.mkdir(parents=True)
+
+    source = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+            "value": [10, 20],
+        }
+    )
+    imputed = impute_tail_to_date(
+        source,
+        observed_until=pd.Timestamp("2024-01-02"),
+        target_until=pd.Timestamp("2024-01-03"),
+    )
+    imputed.to_parquet(parquet_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "last_update": pd.Timestamp("2024-01-04"),
+                "min_timestamp": pd.Timestamp("2024-01-01"),
+                "max_timestamp": pd.Timestamp("2024-01-03"),
+                "num_rows": 3,
+            }
+        ]
+    ).to_parquet(metadata_path, index=False)
+
+    delete_parquet_rows(
+        parquet_path,
+        start_date=pd.Timestamp("2024-01-02"),
+        end_date=pd.Timestamp("2024-01-02"),
+    )
+
+    metadata = pd.read_parquet(metadata_path)
+    assert metadata["max_timestamp"].iloc[0] == pd.Timestamp("2024-01-01")
 
 
 def test_print_parquet_rows_filters_by_date_range(tmp_path, capsys):

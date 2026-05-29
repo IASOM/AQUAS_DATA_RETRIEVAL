@@ -159,6 +159,13 @@ def delete_parquet_rows(
         if temp_path.exists():
             temp_path.unlink()
 
+    _sync_processing_metadata_after_delete(
+        input_path,
+        remaining,
+        date_column=date_column,
+        create_backup=create_backup,
+    )
+
     return deleted_rows, len(remaining), backup_path if create_backup else None
 
 
@@ -338,6 +345,106 @@ def _format_range_text(
     start_text = start_date.date().isoformat() if start_date is not None else "beginning"
     end_text = end_date.date().isoformat() if end_date is not None else "end"
     return f" from {start_text} to {end_text}"
+
+
+def _sync_processing_metadata_after_delete(
+    parquet_path: Path,
+    remaining_df: pd.DataFrame,
+    date_column: str,
+    create_backup: bool,
+) -> Optional[Path]:
+    metadata_path = _infer_processing_metadata_path(parquet_path)
+    if metadata_path is None:
+        return None
+
+    if create_backup and metadata_path.exists():
+        stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        metadata_backup = metadata_path.with_name(f"{metadata_path.name}.bak_{stamp}")
+        shutil.copy2(metadata_path, metadata_backup)
+        logger.info(f"Metadata backup written before sync: {metadata_backup}")
+
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    if parquet_path.parent.name == "incremental":
+        metadata_df = _build_incremental_directory_metadata(
+            metadata_path.parent,
+            date_column,
+        )
+    else:
+        metadata_df = _build_processing_metadata(remaining_df, date_column)
+    metadata_df.to_parquet(metadata_path, index=False)
+
+    if metadata_df.empty:
+        logger.info(f"Updated processing metadata: {metadata_path} (no remaining observed rows)")
+    else:
+        max_timestamp = metadata_df["max_timestamp"].iloc[0]
+        logger.info(
+            f"Updated processing metadata: {metadata_path} "
+            f"(max_timestamp={max_timestamp})"
+        )
+
+    return metadata_path
+
+
+def _infer_processing_metadata_path(parquet_path: Path) -> Optional[Path]:
+    parent = parquet_path.parent
+
+    if parent.name == "incremental" and parquet_path.name != "metadata.parquet":
+        return parent / "metadata.parquet"
+
+    if parent.name == "finals" and parent.parent.name.endswith("_pipeline"):
+        return parent.parent / "incremental" / "metadata.parquet"
+
+    return None
+
+
+def _build_processing_metadata(
+    df: pd.DataFrame,
+    date_column: str,
+) -> pd.DataFrame:
+    columns = ["last_update", "min_timestamp", "max_timestamp", "num_rows"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    timestamps = _timestamp_series(df, date_column)
+    observed_mask = pd.Series(True, index=df.index)
+    if IMPUTED_COL in df.columns:
+        observed_mask = ~is_imputed_series(df[IMPUTED_COL])
+
+    observed_timestamps = timestamps[observed_mask & timestamps.notna()]
+    if observed_timestamps.empty:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "last_update": pd.Timestamp.now(),
+                "min_timestamp": observed_timestamps.min(),
+                "max_timestamp": observed_timestamps.max(),
+                "num_rows": len(observed_timestamps),
+            }
+        ],
+        columns=columns,
+    )
+
+
+def _build_incremental_directory_metadata(
+    incremental_dir: Path,
+    date_column: str,
+) -> pd.DataFrame:
+    frames = []
+    for parquet_file in sorted(incremental_dir.glob("*.parquet")):
+        if parquet_file.name == "metadata.parquet":
+            continue
+        try:
+            frames.append(pd.read_parquet(parquet_file))
+        except Exception as exc:
+            logger.warning(f"Could not read incremental file for metadata sync: {parquet_file}: {exc}")
+
+    if not frames:
+        return pd.DataFrame(columns=["last_update", "min_timestamp", "max_timestamp", "num_rows"])
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    return _build_processing_metadata(combined, date_column)
 
 
 def _parse_cli_date(value: Optional[str], arg_name: str) -> Optional[pd.Timestamp]:
@@ -758,8 +865,8 @@ Features:
                 logger.info(f"Backup written before deletion: {backup_path}")
             if not args.dry_run and deleted_rows > 0:
                 logger.info(
-                    "If you deleted processed final rows so the pipeline reloads them, "
-                    "rerun with an explicit --start-date/--end-date for that range."
+                    "Processing metadata was synced when a pipeline metadata file "
+                    "could be inferred from the Parquet path."
                 )
             return 0
         except Exception as e:
