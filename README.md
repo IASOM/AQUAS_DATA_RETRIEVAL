@@ -319,7 +319,7 @@ python run_pipeline.py --delete-parquet-rows data/demand_pipeline/finals/demand_
 python run_pipeline.py --delete-parquet-rows data/demand_pipeline/finals/demand_final.parquet --start-date 2026-05-26 --end-date 2026-05-28
 ```
 
-L'eliminacio escriu una copia de seguretat al costat del Parquet abans de sobreescriure'l. Si el fitxer es un final dins `data/*_pipeline/finals/`, tambe sincronitza `data/*_pipeline/incremental/metadata.parquet` amb l'ultim timestamp no imputat que encara queda. Aixi la propera execucio normal pot tornar a carregar els dies eliminats. Si vols forcar un rang concret, pots igualment executar el pipeline amb `--start-date` i `--end-date`.
+L'eliminacio escriu una copia de seguretat al costat del Parquet abans de sobreescriure'l. Si el fitxer es un final dins `data/*_pipeline/finals/`, tambe sincronitza `data/*_pipeline/incremental/metadata.parquet` amb l'ultim timestamp no imputat anterior a l'inici del rang eliminat. Aixi la propera execucio normal pot tornar a carregar els dies eliminats, encara que el Parquet final conservi dies posteriors. Si vols forcar un rang concret, pots igualment executar el pipeline amb `--start-date` i `--end-date`.
 
 Veure opcions disponibles:
 
@@ -394,8 +394,8 @@ La base de dades origen pot actualitzar-se de manera asincrona. Per exemple, avu
 Com funciona:
 
 - El pipeline consulta dades reals nomes fins al maxim dia disponible a la taula origen, limitat per avui o per `--end-date`.
-- Despres de construir el final amb dades reals, allarga `demand_final.parquet` i `diagnosis_final.parquet` fins avui.
-- Les dates posteriors a l'ultima data real es calculen amb la mitjana historica del mateix dia i mes en anys anteriors.
+- Despres de construir el final amb dades reals, completa el calendari diari de `demand_final.parquet` i `diagnosis_final.parquet` fins avui.
+- Les dates sense entrada al Parquet final es calculen amb la mitjana historica del mateix dia i mes en anys anteriors.
 - Si una columna no te historial per aquell mateix dia i mes, usa la mitjana observada de la columna com a fallback.
 - Les files reals es marquen amb `__is_imputed = False`.
 - Les files estimades es marquen amb `__is_imputed = True`.

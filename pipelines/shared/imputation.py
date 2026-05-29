@@ -60,9 +60,10 @@ def impute_tail_to_date(
     timestamp_col: str = "timestamp",
 ) -> pd.DataFrame:
     """
-    Extend a final daily dataframe through target_until with tracked estimates.
+    Complete a final daily dataframe through target_until with tracked estimates.
 
-    Only dates after observed_until are imputed. Values are column-wise averages
+    Real rows are kept as observed. Any missing calendar day from the first
+    observed day through target_until is imputed. Values are column-wise averages
     from the same calendar month/day in previous observed years. If a column has
     no same-month/day history, the column's observed mean is used as a fallback.
     """
@@ -90,7 +91,7 @@ def impute_tail_to_date(
     else:
         observed_day = pd.to_datetime(observed_until).normalize()
 
-    observed_day = min(observed_day, real[timestamp_col].max())
+    observed_day = min(observed_day, target_day, real[timestamp_col].max())
     real = real[real[timestamp_col] <= observed_day].copy()
     if real.empty:
         return add_observed_imputation_metadata(real)
@@ -105,15 +106,16 @@ def impute_tail_to_date(
 
     real = add_observed_imputation_metadata(real)
 
-    if target_day <= observed_day:
-        return real.sort_values(timestamp_col).reset_index(drop=True)
+    first_day = real[timestamp_col].min()
+    existing_days = set(real[timestamp_col])
+    candidate_dates = pd.date_range(first_day, target_day, freq="D")
+    imputed_dates = [
+        day
+        for day in candidate_dates
+        if day not in existing_days
+    ]
 
-    imputed_dates = pd.date_range(
-        observed_day + pd.Timedelta(days=1),
-        target_day,
-        freq="D",
-    )
-    if len(imputed_dates) == 0:
+    if not imputed_dates:
         return real.sort_values(timestamp_col).reset_index(drop=True)
 
     history = real.set_index(timestamp_col)

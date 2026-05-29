@@ -164,6 +164,7 @@ def delete_parquet_rows(
         remaining,
         date_column=date_column,
         create_backup=create_backup,
+        cursor_before=start_date,
     )
 
     return deleted_rows, len(remaining), backup_path if create_backup else None
@@ -239,10 +240,6 @@ def check_parquet_imputation(
 
         if imputed_count == 0:
             continue
-
-        if not observed_dates.empty and (imputed_dates <= last_observed).any():
-            ok = False
-            print(f"{label}: WARNING imputed rows exist on/before the last observed date.")
 
         method_col = f"{prefix}{IMPUTATION_METHOD_COL}"
         source_col = f"{prefix}{IMPUTATION_SOURCE_LAST_DATE_COL}"
@@ -352,6 +349,7 @@ def _sync_processing_metadata_after_delete(
     remaining_df: pd.DataFrame,
     date_column: str,
     create_backup: bool,
+    cursor_before: Optional[pd.Timestamp],
 ) -> Optional[Path]:
     metadata_path = _infer_processing_metadata_path(parquet_path)
     if metadata_path is None:
@@ -368,9 +366,14 @@ def _sync_processing_metadata_after_delete(
         metadata_df = _build_incremental_directory_metadata(
             metadata_path.parent,
             date_column,
+            cursor_before=cursor_before,
         )
     else:
-        metadata_df = _build_processing_metadata(remaining_df, date_column)
+        metadata_df = _build_processing_metadata(
+            remaining_df,
+            date_column,
+            cursor_before=cursor_before,
+        )
     metadata_df.to_parquet(metadata_path, index=False)
 
     if metadata_df.empty:
@@ -400,6 +403,7 @@ def _infer_processing_metadata_path(parquet_path: Path) -> Optional[Path]:
 def _build_processing_metadata(
     df: pd.DataFrame,
     date_column: str,
+    cursor_before: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     columns = ["last_update", "min_timestamp", "max_timestamp", "num_rows"]
     if df.empty:
@@ -411,6 +415,10 @@ def _build_processing_metadata(
         observed_mask = ~is_imputed_series(df[IMPUTED_COL])
 
     observed_timestamps = timestamps[observed_mask & timestamps.notna()]
+    if cursor_before is not None:
+        cursor_day = pd.to_datetime(cursor_before).normalize()
+        observed_timestamps = observed_timestamps[observed_timestamps < cursor_day]
+
     if observed_timestamps.empty:
         return pd.DataFrame(columns=columns)
 
@@ -430,6 +438,7 @@ def _build_processing_metadata(
 def _build_incremental_directory_metadata(
     incremental_dir: Path,
     date_column: str,
+    cursor_before: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     frames = []
     for parquet_file in sorted(incremental_dir.glob("*.parquet")):
@@ -444,7 +453,11 @@ def _build_incremental_directory_metadata(
         return pd.DataFrame(columns=["last_update", "min_timestamp", "max_timestamp", "num_rows"])
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
-    return _build_processing_metadata(combined, date_column)
+    return _build_processing_metadata(
+        combined,
+        date_column,
+        cursor_before=cursor_before,
+    )
 
 
 def _parse_cli_date(value: Optional[str], arg_name: str) -> Optional[pd.Timestamp]:

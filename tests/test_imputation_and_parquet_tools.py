@@ -43,8 +43,27 @@ def test_impute_tail_to_date_marks_estimated_rows_and_uses_same_month_day_mean()
     assert imputed_row[IMPUTATION_SOURCE_LAST_DATE_COL] == "2024-01-01"
     assert imputed_row["value"] == 10
 
-    observed = result[result["timestamp"] <= pd.Timestamp("2024-01-01")]
+    observed = result[result["timestamp"].isin(df["timestamp"])]
     assert observed[IMPUTED_COL].eq(False).all()
+
+
+def test_impute_tail_to_date_fills_missing_calendar_days_inside_observed_range():
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-03"]),
+            "value": [10, 20],
+        }
+    )
+
+    result = impute_tail_to_date(
+        df,
+        observed_until=pd.Timestamp("2024-01-03"),
+        target_until=pd.Timestamp("2024-01-03"),
+    )
+
+    imputed_row = result[result["timestamp"] == pd.Timestamp("2024-01-02")].iloc[0]
+    assert bool(imputed_row[IMPUTED_COL]) is True
+    assert imputed_row["value"] == 15
 
 
 def test_drop_imputed_rows_removes_estimates_and_metadata_columns():

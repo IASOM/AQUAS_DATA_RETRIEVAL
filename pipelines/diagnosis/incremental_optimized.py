@@ -11,7 +11,6 @@ from pipelines.shared import (
     get_min_max_date,
     get_year_ranges,
     get_incremental_processing_window,
-    latest_timestamp,
 )
 from pipelines.shared.parquet_storage import ParquetIncrementalManager, ParquetFinalStore
 from .aggregation_optimized import (
@@ -399,12 +398,14 @@ def run_incremental_diagnosis_pipeline_optimized(
     selected_up = _load_selected_up(selected_up_file)
 
     # Get last processed day from metadata, with final parquet as a fallback.
+    metadata_exists = incremental_mgr.metadata_file.exists()
     metadata_last_date = incremental_mgr.get_last_timestamp()
     final_last_date = final_store.get_last_timestamp()
-    last_loaded_date = latest_timestamp(metadata_last_date, final_last_date)
+    last_loaded_date = metadata_last_date if metadata_exists else final_last_date
     logger.info(
         f"Last processed day: {last_loaded_date} "
-        f"(metadata={metadata_last_date}, final={final_last_date})"
+        f"(metadata={metadata_last_date}, final={final_last_date}, "
+        f"metadata_exists={metadata_exists})"
     )
 
     # Connect to database
