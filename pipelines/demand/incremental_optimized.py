@@ -348,7 +348,7 @@ def run_demand_pipeline_main_optimized(
         schema=config.SCHEMA,
         table_name=config.TABLE_NAME,
         date_column=config.DATE_COLUMN,
-        up_rs=pd.read_excel(config.UP_RS_FILE, sheet_name=config.UP_RS_SHEET),
+        up_rs=pd.read_excel(config.resolve_up_rs_file(), sheet_name=config.UP_RS_SHEET),
         incremental_dir=config.PIPELINE_DATA_DIR / "incremental",
         final_file=config.PIPELINE_DATA_DIR / "finals" / "demand_final.parquet",
         selected_rs_file=config.SELECTED_RS_FILE,

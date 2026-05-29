@@ -39,6 +39,47 @@ class Config:
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+    @classmethod
+    def resolve_up_rs_file(cls) -> Path:
+        """Return the UP-RS Excel mapping path, with helpful fallbacks."""
+        configured = Path(cls.UP_RS_FILE).expanduser()
+        candidates = [configured]
+
+        for base_dir in [Path(cls.BASE_DIR), Path.cwd()]:
+            candidates.extend(
+                [
+                    base_dir / "UPperRS.xlsx",
+                    base_dir / "UP per RS.xlsx",
+                    base_dir / "UPperRS.example.xlsx",
+                ]
+            )
+
+        seen = set()
+        unique_candidates = []
+        for path in candidates:
+            try:
+                key = path.resolve()
+            except Exception:
+                key = path.absolute()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_candidates.append(path)
+
+        for path in unique_candidates:
+            if path.exists():
+                return path
+
+        searched = "\n".join(f"  - {path}" for path in unique_candidates)
+        raise FileNotFoundError(
+            "UP-RS mapping Excel file not found. The pipeline needs this file "
+            "to map UP codes to RS groups.\n"
+            f"Searched:\n{searched}\n"
+            "Fix it by restoring the tracked file with:\n"
+            "  git restore UPperRS.xlsx\n"
+            "or set UP_RS_FILE in .env to the real Excel path."
+        )
+
 
 class DemandConfig(Config):
     """Demand pipeline configuration."""

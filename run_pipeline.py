@@ -7,9 +7,12 @@ delegating the actual work to ``run_pipeline_optimized.py``.
 import sys
 
 from run_pipeline_optimized import (
+    check_parquet_imputation,
     convert_parquet_file,
+    delete_parquet_rows,
     join_final_outputs,
     main as _optimized_main,
+    print_parquet_rows,
     run_demand_pipeline_optimized,
     run_diagnosis_pipeline_optimized,
 )

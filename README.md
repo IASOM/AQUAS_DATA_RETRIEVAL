@@ -119,7 +119,17 @@ MAX_DIAGNOSIS_FEATURES=200000
 LOG_LEVEL=INFO
 ```
 
-`UP_RS_FILE` ha d'apuntar a l'Excel amb el full `UP per RS`. El pipeline utilitza aquest fitxer per mapar codis UP a RS.
+`UP_RS_FILE` ha d'apuntar a l'Excel amb el full `UP per RS`. El pipeline utilitza aquest fitxer per mapar codis UP a RS. Si `UPperRS.xlsx` falta en una copia local del repositori, restaura'l amb:
+
+```powershell
+git restore UPperRS.xlsx
+```
+
+Si el fitxer esta en una altra ubicacio, posa la ruta real a `.env`:
+
+```env
+UP_RS_FILE=C:/ruta/al/fitxer/UPperRS.xlsx
+```
 
 ### Seleccions de demanda per RS i UP
 
@@ -287,6 +297,29 @@ python run_pipeline.py --convert-parquet data/diagnosis_pipeline/incremental/inc
 ```
 
 Si no es passa `--output`, el fitxer es crea al mateix directori i amb el mateix nom base, canviant nomes l'extensio a `.csv` o `.xlsx`.
+
+Veure files d'un Parquet per rang de dates:
+
+```bash
+python run_pipeline.py --show-parquet data/demand_pipeline/finals/demand_final.parquet --start-date 2026-05-20 --end-date 2026-05-28
+python run_pipeline.py --show-parquet data/demand_pipeline/finals/demand_final.parquet --start-date 2026-05-20 --end-date 2026-05-28 --parquet-columns timestamp,__is_imputed,__imputation_method --parquet-limit 0
+```
+
+Comprovar les columnes d'imputacio i el recompte de files observades/imputades:
+
+```bash
+python run_pipeline.py --check-imputation data/demand_pipeline/finals/demand_final.parquet
+python run_pipeline.py --check-imputation data/diagnosis_pipeline/finals/diagnosis_final.parquet
+```
+
+Eliminar files d'un Parquet per rang de dates inclusiu:
+
+```bash
+python run_pipeline.py --delete-parquet-rows data/demand_pipeline/finals/demand_final.parquet --start-date 2026-05-26 --end-date 2026-05-28 --dry-run
+python run_pipeline.py --delete-parquet-rows data/demand_pipeline/finals/demand_final.parquet --start-date 2026-05-26 --end-date 2026-05-28
+```
+
+L'eliminacio escriu una copia de seguretat al costat del Parquet abans de sobreescriure'l. Si elimines dies ja processats per forcar una recarrega, torna a executar el pipeline amb `--start-date` i `--end-date` per aquell rang, perque la metadata incremental pot continuar apuntant a l'ultim dia processat.
 
 Veure opcions disponibles:
 

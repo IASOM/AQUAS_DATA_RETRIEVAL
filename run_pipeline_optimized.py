@@ -6,6 +6,7 @@ This version supports two execution modes:
 - Sample mode: use bundled synthetic CSV data and write sample Parquet outputs.
 """
 import argparse
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config import DemandConfig, DiagnosisConfig, get_config
 from pipelines.shared import FinalDataJoiner, setup_logging
+from pipelines.shared.imputation import (
+    IMPUTATION_CREATED_AT_COL,
+    IMPUTATION_METHOD_COL,
+    IMPUTATION_SOURCE_LAST_DATE_COL,
+    IMPUTED_COL,
+    is_imputed_series,
+)
 
 logger = setup_logging()
 
@@ -55,6 +63,281 @@ def convert_parquet_file(
         f"({len(df)} rows, {len(df.columns)} columns)"
     )
     return output_path
+
+
+def print_parquet_rows(
+    input_file: str | Path,
+    start_date: Optional[pd.Timestamp] = None,
+    end_date: Optional[pd.Timestamp] = None,
+    date_column: str = "timestamp",
+    columns: Optional[list[str]] = None,
+    limit: int = 100,
+) -> pd.DataFrame:
+    """Print rows from a Parquet file filtered by an inclusive date range."""
+    input_path = _require_existing_parquet(input_file)
+    if limit < 0:
+        raise ValueError("--parquet-limit must be 0 or a positive integer")
+
+    df = pd.read_parquet(input_path)
+    filtered = _filter_rows_by_date(df, date_column, start_date, end_date)
+    filtered = _with_display_date_column(filtered, df, date_column)
+
+    if columns:
+        display_columns = _resolve_display_columns(filtered, date_column, columns)
+        filtered = filtered[display_columns]
+
+    if date_column in filtered.columns:
+        filtered = filtered.sort_values(date_column)
+
+    display_df = filtered if limit == 0 else filtered.head(limit)
+    range_text = _format_range_text(start_date, end_date)
+    print(f"File: {input_path}")
+    print(f"Date column: {date_column}")
+    print(f"Rows matched{range_text}: {len(filtered)} of {len(df)}")
+    if limit and len(filtered) > len(display_df):
+        print(f"Showing first {len(display_df)} rows. Use --parquet-limit 0 to print all.")
+
+    if display_df.empty:
+        print("(no rows matched)")
+    else:
+        with pd.option_context(
+            "display.max_columns",
+            None,
+            "display.width",
+            240,
+            "display.max_colwidth",
+            120,
+        ):
+            print(display_df.to_string(index=False))
+
+    return filtered
+
+
+def delete_parquet_rows(
+    input_file: str | Path,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    date_column: str = "timestamp",
+    dry_run: bool = False,
+    create_backup: bool = True,
+) -> tuple[int, int, Optional[Path]]:
+    """
+    Delete rows from a Parquet file by inclusive date range.
+
+    Returns (deleted_rows, remaining_rows, backup_path).
+    """
+    input_path = _require_existing_parquet(input_file)
+    if start_date is None or end_date is None:
+        raise ValueError("--delete-parquet-rows requires --start-date and --end-date")
+    if start_date > end_date:
+        raise ValueError("--start-date cannot be after --end-date")
+
+    df = pd.read_parquet(input_path)
+    mask = _date_range_mask(df, date_column, start_date, end_date)
+    deleted_rows = int(mask.sum())
+    remaining = df.loc[~mask].copy()
+
+    if dry_run or deleted_rows == 0:
+        return deleted_rows, len(remaining), None
+
+    stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = input_path.with_name(f"{input_path.name}.bak_{stamp}")
+    temp_path = input_path.with_name(f".{input_path.name}.tmp_{stamp}")
+
+    if create_backup:
+        shutil.copy2(input_path, backup_path)
+
+    try:
+        remaining.to_parquet(
+            temp_path,
+            compression="snappy",
+            index=False,
+            row_group_size=100000,
+        )
+        temp_path.replace(input_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    return deleted_rows, len(remaining), backup_path if create_backup else None
+
+
+def check_parquet_imputation(
+    input_file: str | Path,
+    date_column: str = "timestamp",
+) -> bool:
+    """Validate imputation metadata columns in a final or joined Parquet file."""
+    input_path = _require_existing_parquet(input_file)
+    df = pd.read_parquet(input_path)
+    imputed_cols = [col for col in df.columns if col.endswith(IMPUTED_COL)]
+
+    print(f"File: {input_path}")
+    print(f"Rows: {len(df)}, Columns: {len(df.columns)}")
+
+    if not imputed_cols:
+        print("No imputation metadata columns found.")
+        return False
+
+    timestamps = _timestamp_series(df, date_column)
+    today = pd.Timestamp.today().normalize()
+    ok = True
+
+    duplicate_timestamps = int(timestamps[timestamps.notna()].duplicated().sum())
+    future_rows = int((timestamps > today).sum())
+    if duplicate_timestamps:
+        ok = False
+        print(f"WARNING: {duplicate_timestamps} duplicate timestamp rows found.")
+    if future_rows:
+        ok = False
+        print(f"WARNING: {future_rows} rows are dated after today.")
+
+    suffixes = [
+        IMPUTED_COL,
+        IMPUTATION_METHOD_COL,
+        IMPUTATION_SOURCE_LAST_DATE_COL,
+        IMPUTATION_CREATED_AT_COL,
+    ]
+    for imputed_col in imputed_cols:
+        prefix = imputed_col[: -len(IMPUTED_COL)]
+        label = prefix.rstrip("_") or "base"
+        required = [f"{prefix}{suffix}" for suffix in suffixes]
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            ok = False
+            print(f"{label}: missing metadata columns: {', '.join(missing)}")
+            continue
+
+        imputed_mask = is_imputed_series(df[imputed_col])
+        observed_count = int((~imputed_mask).sum())
+        imputed_count = int(imputed_mask.sum())
+        observed_dates = timestamps[(~imputed_mask) & timestamps.notna()]
+        imputed_dates = timestamps[imputed_mask & timestamps.notna()]
+
+        last_observed = observed_dates.max() if not observed_dates.empty else None
+        imputed_range = (
+            f"{imputed_dates.min().date()} -> {imputed_dates.max().date()}"
+            if not imputed_dates.empty
+            else "none"
+        )
+        last_observed_text = (
+            last_observed.date().isoformat()
+            if last_observed is not None and pd.notna(last_observed)
+            else "none"
+        )
+
+        print(
+            f"{label}: observed={observed_count}, imputed={imputed_count}, "
+            f"last_observed={last_observed_text}, imputed_range={imputed_range}"
+        )
+
+        if imputed_count == 0:
+            continue
+
+        if not observed_dates.empty and (imputed_dates <= last_observed).any():
+            ok = False
+            print(f"{label}: WARNING imputed rows exist on/before the last observed date.")
+
+        method_col = f"{prefix}{IMPUTATION_METHOD_COL}"
+        source_col = f"{prefix}{IMPUTATION_SOURCE_LAST_DATE_COL}"
+        created_col = f"{prefix}{IMPUTATION_CREATED_AT_COL}"
+        for col in [method_col, source_col, created_col]:
+            missing_values = df.loc[imputed_mask, col].isna() | (
+                df.loc[imputed_mask, col].astype("string").str.strip() == ""
+            )
+            if bool(missing_values.any()):
+                ok = False
+                print(f"{label}: WARNING {int(missing_values.sum())} imputed rows have empty {col}.")
+
+    print("Imputation check: OK" if ok else "Imputation check: REVIEW WARNINGS")
+    return ok
+
+
+def _require_existing_parquet(input_file: str | Path) -> Path:
+    input_path = Path(input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Parquet file not found: {input_path}")
+    if input_path.suffix.lower() != ".parquet":
+        raise ValueError(f"Expected a .parquet file: {input_path}")
+    return input_path
+
+
+def _parse_column_list(value: Optional[str]) -> Optional[list[str]]:
+    if value is None:
+        return None
+    columns = [col.strip() for col in value.split(",") if col.strip()]
+    return columns or None
+
+
+def _resolve_display_columns(
+    df: pd.DataFrame,
+    date_column: str,
+    columns: list[str],
+) -> list[str]:
+    display_columns = [date_column] if date_column in df.columns else []
+    display_columns.extend(col for col in columns if col != date_column)
+    missing = [col for col in display_columns if col not in df.columns]
+    if missing:
+        raise ValueError(f"Column(s) not found: {', '.join(missing)}")
+    return display_columns
+
+
+def _filter_rows_by_date(
+    df: pd.DataFrame,
+    date_column: str,
+    start_date: Optional[pd.Timestamp],
+    end_date: Optional[pd.Timestamp],
+) -> pd.DataFrame:
+    mask = _date_range_mask(df, date_column, start_date, end_date)
+    return df.loc[mask].copy()
+
+
+def _date_range_mask(
+    df: pd.DataFrame,
+    date_column: str,
+    start_date: Optional[pd.Timestamp],
+    end_date: Optional[pd.Timestamp],
+) -> pd.Series:
+    timestamps = _timestamp_series(df, date_column)
+    mask = pd.Series(True, index=df.index)
+
+    if start_date is not None:
+        mask &= timestamps.notna() & (timestamps >= pd.to_datetime(start_date).normalize())
+    if end_date is not None:
+        end_exclusive = pd.to_datetime(end_date).normalize() + pd.Timedelta(days=1)
+        mask &= timestamps.notna() & (timestamps < end_exclusive)
+
+    return mask
+
+
+def _timestamp_series(df: pd.DataFrame, date_column: str) -> pd.Series:
+    if date_column in df.columns:
+        return pd.to_datetime(df[date_column], errors="coerce")
+    if isinstance(df.index, pd.DatetimeIndex):
+        return pd.Series(pd.to_datetime(df.index, errors="coerce"), index=df.index)
+    raise ValueError(f"Date column not found: {date_column}")
+
+
+def _with_display_date_column(
+    filtered: pd.DataFrame,
+    source_df: pd.DataFrame,
+    date_column: str,
+) -> pd.DataFrame:
+    out = filtered.copy()
+    if date_column not in out.columns and isinstance(source_df.index, pd.DatetimeIndex):
+        timestamps = pd.Series(pd.to_datetime(source_df.index), index=source_df.index)
+        out.insert(0, date_column, timestamps.loc[out.index].to_numpy())
+    return out
+
+
+def _format_range_text(
+    start_date: Optional[pd.Timestamp],
+    end_date: Optional[pd.Timestamp],
+) -> str:
+    if start_date is None and end_date is None:
+        return ""
+    start_text = start_date.date().isoformat() if start_date is not None else "beginning"
+    end_text = end_date.date().isoformat() if end_date is not None else "end"
+    return f" from {start_text} to {end_text}"
 
 
 def _parse_cli_date(value: Optional[str], arg_name: str) -> Optional[pd.Timestamp]:
@@ -260,6 +543,9 @@ Examples:
   python run_pipeline.py --sample --all                  Run sample data + final join
   python run_pipeline.py --join-final                    Join final outputs only
   python run_pipeline.py --convert-parquet data/finals/x.parquet --to csv
+  python run_pipeline.py --show-parquet data/finals/x.parquet --start-date 2026-05-20 --end-date 2026-05-28
+  python run_pipeline.py --check-imputation data/demand_pipeline/finals/demand_final.parquet
+  python run_pipeline.py --delete-parquet-rows data/finals/x.parquet --start-date 2026-05-26 --end-date 2026-05-28
   python run_pipeline.py --help                          Show this help
 
 Features:
@@ -267,6 +553,7 @@ Features:
   - Incremental and final Parquet outputs
   - Optional explicit date ranges with --start-date and --end-date
   - Parquet conversion to CSV or Excel with --convert-parquet
+  - Parquet row inspection, imputation checks, and date-range row deletion
   - Future-dated rows are excluded from incremental and final outputs
   - Timestamp columns for tracking
   - Columnwise joining of demand and diagnosis
@@ -335,6 +622,44 @@ Features:
         help="Convert a final or incremental Parquet file to CSV or Excel",
     )
     parser.add_argument(
+        "--show-parquet",
+        type=Path,
+        help="Print rows from a Parquet file, optionally filtered by --start-date/--end-date",
+    )
+    parser.add_argument(
+        "--delete-parquet-rows",
+        type=Path,
+        help=(
+            "Delete rows from a Parquet file for the inclusive "
+            "--start-date/--end-date range"
+        ),
+    )
+    parser.add_argument(
+        "--check-imputation",
+        type=Path,
+        help="Validate and summarize imputation metadata in a Parquet final file",
+    )
+    parser.add_argument(
+        "--parquet-date-column",
+        default="timestamp",
+        help="Date/timestamp column used by Parquet row commands",
+    )
+    parser.add_argument(
+        "--parquet-columns",
+        help="Optional comma-separated columns to print with --show-parquet",
+    )
+    parser.add_argument(
+        "--parquet-limit",
+        type=int,
+        default=100,
+        help="Maximum rows printed by --show-parquet. Use 0 to print all matched rows",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview --delete-parquet-rows without writing changes",
+    )
+    parser.add_argument(
         "--to",
         choices=["csv", "excel", "xlsx"],
         default="csv",
@@ -353,6 +678,19 @@ Features:
     )
 
     args = parser.parse_args()
+
+    parquet_ops = [
+        args.convert_parquet,
+        args.show_parquet,
+        args.delete_parquet_rows,
+        args.check_imputation,
+    ]
+    if sum(1 for value in parquet_ops if value) > 1:
+        logger.error(
+            "Use only one Parquet utility command at a time: "
+            "--convert-parquet, --show-parquet, --delete-parquet-rows, or --check-imputation"
+        )
+        return 1
 
     try:
         start_date = _parse_cli_date(args.start_date, "--start-date")
@@ -374,6 +712,58 @@ Features:
             return 0
         except Exception as e:
             logger.error(f"Parquet conversion failed: {e}", exc_info=True)
+            return 1
+
+    if args.show_parquet:
+        try:
+            print_parquet_rows(
+                input_file=args.show_parquet,
+                start_date=start_date,
+                end_date=end_date,
+                date_column=args.parquet_date_column,
+                columns=_parse_column_list(args.parquet_columns),
+                limit=args.parquet_limit,
+            )
+            return 0
+        except Exception as e:
+            logger.error(f"Parquet row display failed: {e}", exc_info=True)
+            return 1
+
+    if args.check_imputation:
+        try:
+            ok = check_parquet_imputation(
+                input_file=args.check_imputation,
+                date_column=args.parquet_date_column,
+            )
+            return 0 if ok else 1
+        except Exception as e:
+            logger.error(f"Imputation check failed: {e}", exc_info=True)
+            return 1
+
+    if args.delete_parquet_rows:
+        try:
+            deleted_rows, remaining_rows, backup_path = delete_parquet_rows(
+                input_file=args.delete_parquet_rows,
+                start_date=start_date,
+                end_date=end_date,
+                date_column=args.parquet_date_column,
+                dry_run=args.dry_run,
+            )
+            action = "Would delete" if args.dry_run else "Deleted"
+            logger.info(
+                f"{action} {deleted_rows} rows from {args.delete_parquet_rows}; "
+                f"{remaining_rows} rows remain"
+            )
+            if backup_path is not None:
+                logger.info(f"Backup written before deletion: {backup_path}")
+            if not args.dry_run and deleted_rows > 0:
+                logger.info(
+                    "If you deleted processed final rows so the pipeline reloads them, "
+                    "rerun with an explicit --start-date/--end-date for that range."
+                )
+            return 0
+        except Exception as e:
+            logger.error(f"Parquet row deletion failed: {e}", exc_info=True)
             return 1
 
     run_demand = False

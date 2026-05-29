@@ -632,7 +632,7 @@ def run_diagnosis_pipeline_main_optimized(
         date_column=config.DATE_COLUMN,
         up_column=config.UP_COLUMN,
         diag_code_column=config.DIAG_CODE_COLUMN,
-        up_rs=pd.read_excel(config.UP_RS_FILE, sheet_name=config.UP_RS_SHEET),
+        up_rs=pd.read_excel(config.resolve_up_rs_file(), sheet_name=config.UP_RS_SHEET),
         incremental_dir=config.PIPELINE_DATA_DIR / "incremental",
         final_file=config.PIPELINE_DATA_DIR / "finals" / "diagnosis_final.parquet",
         selected_codes_file=config.SELECTED_CODES_FILE,
