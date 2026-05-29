@@ -165,6 +165,35 @@ def test_delete_parquet_rows_syncs_metadata_to_last_non_imputed_row(tmp_path):
     assert metadata["max_timestamp"].iloc[0] == pd.Timestamp("2024-01-01")
 
 
+def test_delete_parquet_rows_creates_metadata_before_deleted_range(tmp_path):
+    parquet_path = tmp_path / "demand_pipeline" / "finals" / "demand_final.parquet"
+    metadata_path = tmp_path / "demand_pipeline" / "incremental" / "metadata.parquet"
+    parquet_path.parent.mkdir(parents=True)
+
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-12-30",
+                    "2025-12-31",
+                    "2026-01-01",
+                    "2026-05-29",
+                ]
+            ),
+            "value": [1, 2, 3, 4],
+        }
+    ).to_parquet(parquet_path, index=False)
+
+    delete_parquet_rows(
+        parquet_path,
+        start_date=pd.Timestamp("2026-01-01"),
+        end_date=pd.Timestamp("2026-05-29"),
+    )
+
+    metadata = pd.read_parquet(metadata_path)
+    assert metadata["max_timestamp"].iloc[0] == pd.Timestamp("2025-12-31")
+
+
 def test_print_parquet_rows_filters_by_date_range(tmp_path, capsys):
     parquet_path = tmp_path / "rows.parquet"
     pd.DataFrame(

@@ -319,7 +319,7 @@ python run_pipeline.py --delete-parquet-rows data/demand_pipeline/finals/demand_
 python run_pipeline.py --delete-parquet-rows data/demand_pipeline/finals/demand_final.parquet --start-date 2026-05-26 --end-date 2026-05-28
 ```
 
-L'eliminacio escriu una copia de seguretat al costat del Parquet abans de sobreescriure'l. Si el fitxer es un final dins `data/*_pipeline/finals/`, tambe sincronitza `data/*_pipeline/incremental/metadata.parquet` amb l'ultim timestamp no imputat anterior a l'inici del rang eliminat. Aixi la propera execucio normal pot tornar a carregar els dies eliminats, encara que el Parquet final conservi dies posteriors. Si vols forcar un rang concret, pots igualment executar el pipeline amb `--start-date` i `--end-date`.
+L'eliminacio escriu una copia de seguretat al costat del Parquet abans de sobreescriure'l. Si el fitxer es un final dins `data/*_pipeline/finals/`, tambe crea o sincronitza `data/*_pipeline/incremental/metadata.parquet` amb l'ultim timestamp no imputat anterior a l'inici del rang eliminat. Per exemple, si elimines `2026-01-01` -> `2026-05-29`, el cursor queda a `2025-12-31`. Aixi la propera execucio normal pot tornar a carregar els dies eliminats, encara que el Parquet final conservi dies posteriors. Amb `--dry-run` nomes es mostra que passaria, sense modificar ni el Parquet ni la metadata.
 
 Veure opcions disponibles:
 

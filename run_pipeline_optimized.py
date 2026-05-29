@@ -137,7 +137,16 @@ def delete_parquet_rows(
     deleted_rows = int(mask.sum())
     remaining = df.loc[~mask].copy()
 
-    if dry_run or deleted_rows == 0:
+    if dry_run:
+        _preview_processing_metadata_after_delete(
+            input_path,
+            remaining,
+            date_column=date_column,
+            cursor_before=start_date,
+        )
+        return deleted_rows, len(remaining), None
+
+    if deleted_rows == 0:
         return deleted_rows, len(remaining), None
 
     stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
@@ -351,7 +360,12 @@ def _sync_processing_metadata_after_delete(
     create_backup: bool,
     cursor_before: Optional[pd.Timestamp],
 ) -> Optional[Path]:
-    metadata_path = _infer_processing_metadata_path(parquet_path)
+    metadata_path, metadata_df = _build_metadata_after_delete(
+        parquet_path,
+        remaining_df,
+        date_column=date_column,
+        cursor_before=cursor_before,
+    )
     if metadata_path is None:
         return None
 
@@ -362,11 +376,52 @@ def _sync_processing_metadata_after_delete(
         logger.info(f"Metadata backup written before sync: {metadata_backup}")
 
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_df.to_parquet(metadata_path, index=False)
+
+    _log_metadata_sync_result("Updated", metadata_path, metadata_df)
+
+    return metadata_path
+
+
+def _preview_processing_metadata_after_delete(
+    parquet_path: Path,
+    remaining_df: pd.DataFrame,
+    date_column: str,
+    cursor_before: Optional[pd.Timestamp],
+) -> None:
+    metadata_path, metadata_df = _build_metadata_after_delete(
+        parquet_path,
+        remaining_df,
+        date_column=date_column,
+        cursor_before=cursor_before,
+    )
+    if metadata_path is None:
+        logger.info(
+            "No pipeline metadata inferred for this Parquet path. "
+            "Joined outputs do not control demand/diagnosis resume state."
+        )
+        return
+
+    _log_metadata_sync_result("Would update", metadata_path, metadata_df)
+
+
+def _build_metadata_after_delete(
+    parquet_path: Path,
+    remaining_df: pd.DataFrame,
+    date_column: str,
+    cursor_before: Optional[pd.Timestamp],
+) -> tuple[Optional[Path], pd.DataFrame]:
+    metadata_path = _infer_processing_metadata_path(parquet_path)
+    if metadata_path is None:
+        return None, pd.DataFrame(columns=["last_update", "min_timestamp", "max_timestamp", "num_rows"])
+
     if parquet_path.parent.name == "incremental":
         metadata_df = _build_incremental_directory_metadata(
             metadata_path.parent,
             date_column,
             cursor_before=cursor_before,
+            override_file=parquet_path,
+            override_df=remaining_df,
         )
     else:
         metadata_df = _build_processing_metadata(
@@ -374,18 +429,24 @@ def _sync_processing_metadata_after_delete(
             date_column,
             cursor_before=cursor_before,
         )
-    metadata_df.to_parquet(metadata_path, index=False)
+
+    return metadata_path, metadata_df
+
+
+def _log_metadata_sync_result(
+    action: str,
+    metadata_path: Path,
+    metadata_df: pd.DataFrame,
+) -> None:
 
     if metadata_df.empty:
-        logger.info(f"Updated processing metadata: {metadata_path} (no remaining observed rows)")
+        logger.info(f"{action} processing metadata: {metadata_path} (no remaining observed rows)")
     else:
         max_timestamp = metadata_df["max_timestamp"].iloc[0]
         logger.info(
-            f"Updated processing metadata: {metadata_path} "
+            f"{action} processing metadata: {metadata_path} "
             f"(max_timestamp={max_timestamp})"
         )
-
-    return metadata_path
 
 
 def _infer_processing_metadata_path(parquet_path: Path) -> Optional[Path]:
@@ -439,13 +500,19 @@ def _build_incremental_directory_metadata(
     incremental_dir: Path,
     date_column: str,
     cursor_before: Optional[pd.Timestamp] = None,
+    override_file: Optional[Path] = None,
+    override_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     frames = []
+    override_resolved = override_file.resolve() if override_file is not None else None
     for parquet_file in sorted(incremental_dir.glob("*.parquet")):
         if parquet_file.name == "metadata.parquet":
             continue
         try:
-            frames.append(pd.read_parquet(parquet_file))
+            if override_resolved is not None and parquet_file.resolve() == override_resolved:
+                frames.append(override_df.copy() if override_df is not None else pd.DataFrame())
+            else:
+                frames.append(pd.read_parquet(parquet_file))
         except Exception as exc:
             logger.warning(f"Could not read incremental file for metadata sync: {parquet_file}: {exc}")
 
