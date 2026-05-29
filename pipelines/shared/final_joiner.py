@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import warnings
 
 from .parquet_storage import drop_future_timestamp_rows
+from .imputation import write_imputation_metadata_files
 
 warnings.filterwarnings("ignore")
 
@@ -165,6 +166,14 @@ class FinalDataJoiner:
         logger.info(
             f"Saved successfully: {len(df)} rows, {len(df.columns)} columns, "
             f"{file_size:.2f} MB"
+        )
+        summary_path, rows_path = write_imputation_metadata_files(
+            df,
+            self.output_file,
+            timestamp_col=self.timestamp_col,
+        )
+        logger.info(
+            f"Saved imputation metadata: {summary_path.name}, {rows_path.name}"
         )
 
     def join_and_save(

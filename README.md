@@ -310,7 +310,15 @@ Comprovar les columnes d'imputacio i el recompte de files observades/imputades:
 ```bash
 python run_pipeline.py --check-imputation data/demand_pipeline/finals/demand_final.parquet
 python run_pipeline.py --check-imputation data/diagnosis_pipeline/finals/diagnosis_final.parquet
+python run_pipeline.py --write-imputation-metadata data/demand_pipeline/finals/demand_final.parquet
 ```
+
+Cada vegada que s'escriu un Parquet final tambe es guarden fitxers de metadata d'imputacio al mateix directori:
+
+| Fitxer | Contingut |
+| --- | --- |
+| `*_imputation_metadata.json` | Resum amb nombre total de files imputades, recompte per dataset i llista de dates imputades |
+| `*_imputed_rows.csv` | Una fila per data imputada amb metode, ultima data real usada i moment de creacio |
 
 Eliminar files d'un Parquet per rang de dates inclusiu:
 

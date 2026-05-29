@@ -15,6 +15,7 @@ from run_pipeline_optimized import (
     print_parquet_rows,
     run_demand_pipeline_optimized,
     run_diagnosis_pipeline_optimized,
+    write_parquet_imputation_metadata,
 )
 
 

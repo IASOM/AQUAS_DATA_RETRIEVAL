@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pandas as pd
 
@@ -8,13 +9,16 @@ from pipelines.shared.imputation import (
     IMPUTED_COL,
     SAME_MONTH_DAY_METHOD,
     drop_imputed_rows,
+    get_imputation_metadata_paths,
     impute_tail_to_date,
 )
 from run_pipeline_optimized import (
     check_parquet_imputation,
     delete_parquet_rows,
     print_parquet_rows,
+    write_parquet_imputation_metadata,
 )
+from pipelines.shared.parquet_storage import ParquetFinalStore
 
 
 def test_impute_tail_to_date_marks_estimated_rows_and_uses_same_month_day_mean():
@@ -194,6 +198,27 @@ def test_delete_parquet_rows_creates_metadata_before_deleted_range(tmp_path):
     assert metadata["max_timestamp"].iloc[0] == pd.Timestamp("2025-12-31")
 
 
+def test_final_store_last_contiguous_timestamp_stops_before_deleted_gap(tmp_path):
+    parquet_path = tmp_path / "demand_final.parquet"
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-12-30",
+                    "2025-12-31",
+                    "2026-05-27",
+                ]
+            ),
+            "value": [1, 2, 3],
+        }
+    ).to_parquet(parquet_path, index=False)
+
+    store = ParquetFinalStore(parquet_path)
+
+    assert store.get_last_timestamp() == pd.Timestamp("2026-05-27")
+    assert store.get_last_contiguous_timestamp() == pd.Timestamp("2025-12-31")
+
+
 def test_print_parquet_rows_filters_by_date_range(tmp_path, capsys):
     parquet_path = tmp_path / "rows.parquet"
     pd.DataFrame(
@@ -240,3 +265,54 @@ def test_check_parquet_imputation_accepts_valid_metadata(tmp_path):
     result.to_parquet(parquet_path, index=False)
 
     assert check_parquet_imputation(parquet_path)
+
+
+def test_final_store_writes_imputation_metadata_sidecars(tmp_path):
+    parquet_path = tmp_path / "demand_final.parquet"
+    source = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-03"]),
+            "value": [10, 20],
+        }
+    )
+    result = impute_tail_to_date(
+        source,
+        observed_until=pd.Timestamp("2024-01-03"),
+        target_until=pd.Timestamp("2024-01-03"),
+    )
+
+    store = ParquetFinalStore(parquet_path)
+    store.save_final(result)
+
+    summary_path, rows_path = get_imputation_metadata_paths(parquet_path)
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    rows = pd.read_csv(rows_path)
+
+    assert summary_path.exists()
+    assert rows_path.exists()
+    assert summary["total_imputed_rows"] == 1
+    assert summary["groups"][0]["imputed_dates"] == ["2024-01-02"]
+    assert rows["timestamp"].tolist() == ["2024-01-02"]
+
+
+def test_write_parquet_imputation_metadata_command_helper(tmp_path):
+    parquet_path = tmp_path / "diagnosis_final.parquet"
+    source = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-03"]),
+            "value": [10, 20],
+        }
+    )
+    result = impute_tail_to_date(
+        source,
+        observed_until=pd.Timestamp("2024-01-03"),
+        target_until=pd.Timestamp("2024-01-03"),
+    )
+    result.to_parquet(parquet_path, index=False)
+
+    summary_path, rows_path = write_parquet_imputation_metadata(parquet_path)
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    rows = pd.read_csv(rows_path)
+
+    assert summary["total_imputed_rows"] == 1
+    assert rows["timestamp"].tolist() == ["2024-01-02"]

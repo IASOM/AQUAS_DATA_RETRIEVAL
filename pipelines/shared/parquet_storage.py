@@ -6,7 +6,11 @@ from typing import Optional, Tuple
 import logging
 from uuid import uuid4
 
-from .imputation import IMPUTED_COL, is_imputed_series
+from .imputation import (
+    IMPUTED_COL,
+    is_imputed_series,
+    write_imputation_metadata_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +284,14 @@ class ParquetFinalStore:
             f"Saved final output: {self.output_file.name} "
             f"({len(df)} rows, {len(df.columns)} columns)"
         )
+        summary_path, rows_path = write_imputation_metadata_files(
+            df,
+            self.output_file,
+            timestamp_col=index_col,
+        )
+        logger.info(
+            f"Saved imputation metadata: {summary_path.name}, {rows_path.name}"
+        )
 
     def load_final(self) -> pd.DataFrame:
         """Load final data efficiently."""
@@ -320,6 +332,50 @@ class ParquetFinalStore:
             return None
 
         return timestamps.max()
+
+    def get_last_contiguous_timestamp(
+        self,
+        timestamp_col: str = "timestamp",
+    ) -> Optional[pd.Timestamp]:
+        """Get the last non-imputed day before the first missing daily row."""
+        if not self.output_file.exists():
+            return None
+
+        try:
+            df = pd.read_parquet(self.output_file, columns=[timestamp_col, IMPUTED_COL])
+        except Exception:
+            try:
+                df = pd.read_parquet(self.output_file, columns=[timestamp_col])
+            except Exception as e:
+                logger.warning(f"Could not read final timestamp from {self.output_file}: {e}")
+                return None
+
+        if df.empty or timestamp_col not in df.columns:
+            return None
+
+        if IMPUTED_COL in df.columns:
+            df = df[~is_imputed_series(df[IMPUTED_COL])]
+
+        timestamps = (
+            pd.to_datetime(df[timestamp_col], errors="coerce")
+            .dropna()
+            .dt.floor("D")
+            .drop_duplicates()
+            .sort_values()
+        )
+        if timestamps.empty:
+            return None
+
+        min_day = timestamps.iloc[0]
+        max_day = timestamps.iloc[-1]
+        expected = pd.date_range(min_day, max_day, freq="D")
+        observed = pd.DatetimeIndex(timestamps)
+        missing = expected.difference(observed)
+        if missing.empty:
+            return max_day
+
+        first_missing = missing[0]
+        return first_missing - pd.Timedelta(days=1)
 
     def _optimize_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
         """Optimize data types for efficient storage."""

@@ -179,11 +179,16 @@ def run_incremental_pipeline_optimized(
     # Get last processed day from metadata, with final parquet as a fallback.
     metadata_exists = incremental_mgr.metadata_file.exists()
     metadata_last_date = incremental_mgr.get_last_timestamp()
-    final_last_date = final_store.get_last_timestamp()
-    last_loaded_date = metadata_last_date if metadata_exists else final_last_date
+    final_last_date = final_store.get_last_contiguous_timestamp()
+    if metadata_exists and metadata_last_date is not None and final_last_date is not None:
+        last_loaded_date = min(metadata_last_date, final_last_date)
+    elif metadata_exists:
+        last_loaded_date = metadata_last_date
+    else:
+        last_loaded_date = final_last_date
     logger.info(
         f"Last processed day: {last_loaded_date} "
-        f"(metadata={metadata_last_date}, final={final_last_date}, "
+        f"(metadata={metadata_last_date}, final_contiguous={final_last_date}, "
         f"metadata_exists={metadata_exists})"
     )
 

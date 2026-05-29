@@ -25,6 +25,7 @@ from pipelines.shared.imputation import (
     IMPUTATION_SOURCE_LAST_DATE_COL,
     IMPUTED_COL,
     is_imputed_series,
+    write_imputation_metadata_files,
 )
 
 logger = setup_logging()
@@ -263,6 +264,23 @@ def check_parquet_imputation(
 
     print("Imputation check: OK" if ok else "Imputation check: REVIEW WARNINGS")
     return ok
+
+
+def write_parquet_imputation_metadata(
+    input_file: str | Path,
+    date_column: str = "timestamp",
+) -> tuple[Path, Path]:
+    """Write imputation sidecar metadata files for an existing Parquet file."""
+    input_path = _require_existing_parquet(input_file)
+    df = pd.read_parquet(input_path)
+    summary_path, rows_path = write_imputation_metadata_files(
+        df,
+        input_path,
+        timestamp_col=date_column,
+    )
+    logger.info(f"Wrote imputation metadata summary: {summary_path}")
+    logger.info(f"Wrote imputed row list: {rows_path}")
+    return summary_path, rows_path
 
 
 def _require_existing_parquet(input_file: str | Path) -> Path:
@@ -732,6 +750,7 @@ Examples:
   python run_pipeline.py --convert-parquet data/finals/x.parquet --to csv
   python run_pipeline.py --show-parquet data/finals/x.parquet --start-date 2026-05-20 --end-date 2026-05-28
   python run_pipeline.py --check-imputation data/demand_pipeline/finals/demand_final.parquet
+  python run_pipeline.py --write-imputation-metadata data/demand_pipeline/finals/demand_final.parquet
   python run_pipeline.py --delete-parquet-rows data/finals/x.parquet --start-date 2026-05-26 --end-date 2026-05-28
   python run_pipeline.py --help                          Show this help
 
@@ -827,6 +846,11 @@ Features:
         help="Validate and summarize imputation metadata in a Parquet final file",
     )
     parser.add_argument(
+        "--write-imputation-metadata",
+        type=Path,
+        help="Write JSON/CSV imputation metadata sidecars for a Parquet file",
+    )
+    parser.add_argument(
         "--parquet-date-column",
         default="timestamp",
         help="Date/timestamp column used by Parquet row commands",
@@ -871,11 +895,13 @@ Features:
         args.show_parquet,
         args.delete_parquet_rows,
         args.check_imputation,
+        args.write_imputation_metadata,
     ]
     if sum(1 for value in parquet_ops if value) > 1:
         logger.error(
             "Use only one Parquet utility command at a time: "
-            "--convert-parquet, --show-parquet, --delete-parquet-rows, or --check-imputation"
+            "--convert-parquet, --show-parquet, --delete-parquet-rows, "
+            "--check-imputation, or --write-imputation-metadata"
         )
         return 1
 
@@ -925,6 +951,17 @@ Features:
             return 0 if ok else 1
         except Exception as e:
             logger.error(f"Imputation check failed: {e}", exc_info=True)
+            return 1
+
+    if args.write_imputation_metadata:
+        try:
+            write_parquet_imputation_metadata(
+                input_file=args.write_imputation_metadata,
+                date_column=args.parquet_date_column,
+            )
+            return 0
+        except Exception as e:
+            logger.error(f"Writing imputation metadata failed: {e}", exc_info=True)
             return 1
 
     if args.delete_parquet_rows:
