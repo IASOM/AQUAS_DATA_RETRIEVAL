@@ -203,8 +203,19 @@ def get_min_max_date(
     table_name: str,
     date_column: str,
     min_valid_date: str = "2000-01-01",
+    max_valid_date: Optional[str | pd.Timestamp] = None,
 ) -> tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    """Get minimum and maximum dates from database table."""
+    """Get minimum and maximum dates from database table.
+
+    The upper bound defaults to tomorrow so today's rows are included while
+    obviously future/corrupt source timestamps are ignored before pandas parses
+    the database MAX value.
+    """
+    if max_valid_date is None:
+        max_valid_date = (
+            pd.Timestamp.today().normalize() + pd.Timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
     query = f"""
     SELECT
         MIN([{date_column}]) AS min_date,
@@ -212,8 +223,9 @@ def get_min_max_date(
     FROM [{schema}].[{table_name}]
     WHERE [{date_column}] IS NOT NULL
         AND [{date_column}] >= ?
+        AND [{date_column}] < ?
     """
-    df = pd.read_sql_query(query, conn, params=[min_valid_date])
+    df = pd.read_sql_query(query, conn, params=[min_valid_date, max_valid_date])
 
     if df.empty or pd.isna(df.loc[0, "min_date"]) or pd.isna(df.loc[0, "max_date"]):
         return None, None

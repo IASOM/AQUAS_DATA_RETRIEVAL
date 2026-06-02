@@ -38,7 +38,7 @@ data/finals/demand_diagnosis_joined.parquet
 
 Regla de dates: els incrementals, els finals i el fitxer unit no han de contenir files posteriors a avui. Les consultes fan servir de tall de fi el principi de dema, de manera que inclouen tot el dia d'avui pero exclouen qualsevol data futura. L'escriptura Parquet tambe elimina files futures si arriben per error.
 
-Si la taula origen encara no ha carregat dades fins avui, les sortides finals s'allarguen fins avui amb valors imputats. Aquests dies es marquen amb `__is_imputed = True`, `__imputation_method`, `__imputation_source_last_date` i `__imputation_created_at`. La imputacio fa servir la mitjana historica del mateix dia i mes en anys anteriors, amb mitjana global de la columna com a fallback. En una execucio posterior, quan les dades reals ja existeixin al servidor, aquestes files imputades no compten com a dades processades i es substitueixen pels valors reals.
+Si la taula origen encara no ha carregat dades fins avui, o fins al `--end-date` que has demanat, les sortides finals s'allarguen fins al dia objectiu amb valors imputats. El dia objectiu mai pot ser posterior a avui. Aquests dies es marquen amb `__is_imputed = True`, `__imputation_method`, `__imputation_source_last_date` i `__imputation_created_at`. La imputacio fa servir la mitjana historica del mateix dia i mes en anys anteriors, amb mitjana global de la columna com a fallback. En una execucio posterior, quan les dades reals ja existeixin al servidor, aquestes files imputades no compten com a dades processades i es substitueixen pels valors reals.
 
 ## Estructura actual
 
@@ -262,6 +262,19 @@ python run_pipeline.py --diagnosis --end-date 2026-05-20
 
 Si nomes passes `--start-date`, el final del rang es avui. Si nomes passes `--end-date`, l'inici continua sent incremental: ultim dia processat + 1, o `2008-01-01` si encara no hi ha final.
 
+### Com s'interpreta `--end-date`
+
+`--end-date` marca fins quin dia vols tenir cobert el Parquet final, pero no obliga la base de dades a tenir dades reals fins aquell dia. El pipeline separa sempre dos conceptes:
+
+| Concepte | Que vol dir | Exemple amb `--end-date 2026-06-02` |
+| --- | --- | --- |
+| Rang real observat | Dies que existeixen a la taula origen i que es consulten a Synapse | Si la taula nomes te dades fins `2026-05-27`, el log dira `Processing new demand days: 2026-01-01 -> 2026-05-27` |
+| Rang final desitjat | Dies que han d'apareixer al Parquet final | El final s'allarga fins `2026-06-02` amb files imputades per `2026-05-28` -> `2026-06-02` |
+
+Per tant, veure un log que acaba el dia 27 no vol dir que `--end-date 2026-06-02` s'hagi ignorat. Vol dir que el maxim dia real disponible a la font era el 27. Els dies fins al 2 de juny es creen despres en la fase d'imputacio i queden marcats amb `__is_imputed = True`.
+
+Tant demanda com diagnostics apliquen el mateix comportament. Si la font conte timestamps futurs o corruptes, per exemple una data com `4512-06-23`, aquestes dates s'ignoren ja en la consulta que calcula el `MIN/MAX`: la query nomes considera dates des de `MIN_VALID_DATE` fins abans de dema. Aixo evita que pandas falli amb `OutOfBoundsDatetime` i tambe evita que una data futura falsa ampliï el rang real observat.
+
 Executar amb dades sintetiques locals, sense connexio a la base de dades:
 
 ```bash
@@ -379,7 +392,7 @@ python .\scripts\check_source_upload_metadata.py --driver "ODBC Driver 17 for SQ
 
 Cap sortida incremental, final o unida hauria de tenir timestamps posteriors a avui. Si el sistema origen retorna dates futures, es descarten abans d'escriure el Parquet.
 
-Les sortides finals poden contenir files imputades fins avui quan la base de dades origen encara no ha publicat dades per als darrers dies. Aquestes files es poden identificar amb les columnes de control descrites a la seccio seguent.
+Les sortides finals poden contenir files imputades fins avui, o fins al `--end-date` si n'has passat un d'anterior a avui, quan la base de dades origen encara no ha publicat dades per als darrers dies. Aquestes files es poden identificar amb les columnes de control descrites a la seccio seguent.
 
 ## Incremental diari
 
@@ -395,14 +408,14 @@ Despres d'una primera reconstruccio historica, les execucions seguents son diari
 
 Si cal reprocessar dies antics per canvis retroactius a la base de dades, executa el rang amb `--start-date` i `--end-date`. El mode normal sense dates esta optimitzat per afegir dies nous, no per detectar modificacions historiques.
 
-## Imputacio fins avui
+## Imputacio fins al dia objectiu
 
-La base de dades origen pot actualitzar-se de manera asincrona. Per exemple, avui pot ser `2026-05-28`, pero l'ultima data real disponible a Synapse pot ser `2026-05-25`. Abans aquests dies posteriors podien quedar com a zeros, cosa que feia semblar que hi havia activitat real igual a zero. Ara el pipeline els tracta com a valors no observats i els imputa.
+La base de dades origen pot actualitzar-se de manera asincrona. Per exemple, avui pot ser `2026-05-28`, pero l'ultima data real disponible a Synapse pot ser `2026-05-25`. Abans aquests dies posteriors podien quedar com a zeros, cosa que feia semblar que hi havia activitat real igual a zero. Ara el pipeline els tracta com a valors no observats i els imputa. El dia objectiu es `--end-date` si l'has passat i no es futur; si no, es avui.
 
 Com funciona:
 
 - El pipeline consulta dades reals nomes fins al maxim dia disponible a la taula origen, limitat per avui o per `--end-date`.
-- Despres de construir el final amb dades reals, completa el calendari diari de `demand_final.parquet` i `diagnosis_final.parquet` fins avui.
+- Despres de construir el final amb dades reals, completa el calendari diari de `demand_final.parquet` i `diagnosis_final.parquet` fins al dia objectiu.
 - Les dates sense entrada al Parquet final es calculen amb la mitjana historica del mateix dia i mes en anys anteriors.
 - Si una columna no te historial per aquell mateix dia i mes, usa la mitjana observada de la columna com a fallback.
 - Les files reals es marquen amb `__is_imputed = False`.
@@ -541,6 +554,8 @@ Construeix la connexio `pyodbc` amb ODBC Driver 18 i autenticacio `ActiveDirecto
 
 Conte utilitats comunes: lectura de rangs de dates, particio per anys, consultes SQL per finestres temporals i funcions legacy de CSV/estat.
 
+Quan calcula el `MIN/MAX` de dates d'una taula origen, aplica un limit superior abans de dema. Aixo inclou tot avui, pero exclou dates futures o corruptes abans que pandas les converteixi a `Timestamp`.
+
 ### `pipelines/shared/parquet_storage.py`
 
 Gestiona incrementals Parquet, metadades, retencio opcional de fitxers antics i escriptura de sortides finals. En reconstruccions historiques s'ha de mantenir `retention_days=None` per conservar tots els dies abans de l'agregacio final.
@@ -551,7 +566,7 @@ Quan llegeix l'ultim timestamp del Parquet final, ignora les files amb `__is_imp
 
 ### `pipelines/shared/imputation.py`
 
-Conte la logica d'imputacio de cua fins avui:
+Conte la logica d'imputacio de cua fins al dia objectiu:
 
 - Elimina files imputades antigues abans de fusionar dades reals noves.
 - Afegeix les columnes `__is_imputed`, `__imputation_method`, `__imputation_source_last_date` i `__imputation_created_at`.
