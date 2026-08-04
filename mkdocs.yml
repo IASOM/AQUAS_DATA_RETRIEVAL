@@ -1,0 +1,23 @@
+site_name: AQUAS / PREDAP Data Pipelines
+site_description: Documentation for the AQUAS PREDAP demand and diagnosis Parquet pipelines.
+repo_url: https://github.com/IASOM/AQUAS_DATA_RETRIEVAL
+repo_name: IASOM/AQUAS_DATA_RETRIEVAL
+
+theme:
+  name: mkdocs
+  navigation_depth: 3
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Execution: execution.md
+  - Toy Data: toy-data.md
+  - Naming: naming.md
+  - Diagnosis And Territory Selections: selections.md
+  - Outputs: outputs.md
+  - Validation: validation.md
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
