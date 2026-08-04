@@ -106,6 +106,63 @@ def _normalize_diag_codes(values: pd.Series) -> pd.Series:
     return values.astype("string").str.strip().str.upper().str[:3]
 
 
+def _expand_diagnosis_code_spec(value) -> list[str]:
+    """Expand one ICD10_3 code or range specification into normalized codes."""
+    if pd.isna(value):
+        return []
+
+    token = str(value).strip().upper()
+    if not token:
+        return []
+
+    token = token.replace("–", "-").replace("—", "-")
+    token = token.replace(" ", "")
+    if "-" not in token:
+        code = _normalize_diag_codes(pd.Series([token])).iloc[0]
+        return [] if pd.isna(code) or not code else [str(code)]
+
+    start_raw, end_raw = token.split("-", 1)
+    start = _parse_icd10_3_bound(start_raw)
+    end = _parse_icd10_3_bound(end_raw, start_letter=start[0] if start else None)
+    if start is None or end is None:
+        code = _normalize_diag_codes(pd.Series([token])).iloc[0]
+        return [] if pd.isna(code) or not code else [str(code)]
+
+    start_letter, start_num = start
+    end_letter, end_num = end
+    if (end_letter, end_num) < (start_letter, start_num):
+        return []
+
+    codes = []
+    for letter_ord in range(ord(start_letter), ord(end_letter) + 1):
+        letter = chr(letter_ord)
+        first_num = start_num if letter == start_letter else 0
+        last_num = end_num if letter == end_letter else 99
+        codes.extend(f"{letter}{num:02d}" for num in range(first_num, last_num + 1))
+    return codes
+
+
+def _parse_icd10_3_bound(
+    value: str,
+    start_letter: Optional[str] = None,
+) -> Optional[tuple[str, int]]:
+    """Parse an ICD10_3 range bound, accepting incomplete upper bounds like F4."""
+    match = re.match(r"^([A-Z]?)(\d{1,2})", value)
+    if not match:
+        return None
+
+    letter = match.group(1) or start_letter
+    if not letter:
+        return None
+
+    digits = match.group(2)
+    number = int(digits)
+    if len(digits) == 1:
+        number = number * 10 + 9
+
+    return letter, number
+
+
 def _normalize_up_codes(values: pd.Series) -> pd.Series:
     """Normalize UP codes so they match the Excel mapping."""
     return values.astype("string").str.strip().str.zfill(5)
@@ -129,6 +186,58 @@ def _normalize_feature_name(value, fallback: str) -> str:
     return token or fallback
 
 
+def _normalize_geo_alias(value, fallback: str) -> str:
+    """Normalize a configured territorial subset identifier for output names."""
+    if pd.isna(value):
+        return fallback
+
+    token = str(value).strip()
+    if not token:
+        return fallback
+
+    token = re.sub(r"[^0-9A-Za-z]+", "_", token).strip("_").upper()
+    return token or fallback
+
+
+def _selection_map_from_df(
+    selection_df: pd.DataFrame,
+    normalizer,
+) -> dict[str, str]:
+    """Build source-value -> output-geo-id mapping from a selection CSV."""
+    if selection_df.empty:
+        return {}
+
+    columns = list(selection_df.columns)
+    column_lookup = {str(col).strip().lower(): col for col in columns}
+    source_col = (
+        column_lookup.get("rs")
+        or column_lookup.get("up")
+        or column_lookup.get("value")
+        or column_lookup.get("source_value")
+        or (columns[1] if len(columns) > 1 else columns[0])
+    )
+    alias_col = (
+        column_lookup.get("geo_id")
+        or column_lookup.get("id")
+        or column_lookup.get("subset_id")
+        or (columns[0] if len(columns) > 1 else source_col)
+    )
+
+    mapping = {}
+    for _, row in selection_df.iterrows():
+        source_values = normalizer(pd.Series([row[source_col]])).dropna()
+        if source_values.empty:
+            continue
+
+        source = str(source_values.iloc[0])
+        if not source:
+            continue
+
+        alias = _normalize_geo_alias(row[alias_col], fallback=source)
+        mapping[source] = alias
+    return mapping
+
+
 def _load_selection_values(
     selection_file: Optional[str | Path],
     filename: str,
@@ -136,7 +245,7 @@ def _load_selection_values(
     normalizer,
     legacy_filename: Optional[str] = None,
     legacy_subdir: Optional[str] = None,
-) -> Optional[set[str]]:
+) -> Optional[dict[str, str]]:
     """Load a one-column selection CSV from the shared selections folder."""
     candidates = []
     if selection_file:
@@ -171,9 +280,8 @@ def _load_selection_values(
             continue
 
         found_file = True
-        selection_df = pd.read_csv(path)
-        values = set(normalizer(selection_df.iloc[:, 0]).dropna())
-        values.discard("")
+        selection_df = pd.read_csv(path, dtype=str)
+        values = _selection_map_from_df(selection_df, normalizer)
         if not values:
             logger.warning(f"Selected {label} file is empty: {path}")
             continue
@@ -237,23 +345,23 @@ def _load_selected_codes(
             continue
 
         code_aliases: dict[str, list[str]] = {}
-        alias_col = selected_df.columns[1] if len(selected_df.columns) > 1 else None
+        column_lookup = {str(col).strip().lower(): col for col in selected_df.columns}
+        alias_col = column_lookup.get("feature_name")
         for _, row in selected_df.iterrows():
-            code_series = _normalize_diag_codes(pd.Series([row.iloc[0]]))
-            if code_series.empty or pd.isna(code_series.iloc[0]):
-                continue
-            code = str(code_series.iloc[0])
-            if not code:
+            codes = _expand_diagnosis_code_spec(row.iloc[0])
+            if not codes:
                 continue
 
             alias = (
-                _normalize_feature_name(row[alias_col], fallback=code)
+                _normalize_feature_name(row[alias_col], fallback=codes[0])
                 if alias_col is not None
-                else code
+                else None
             )
-            aliases = code_aliases.setdefault(code, [])
-            if alias not in aliases:
-                aliases.append(alias)
+            for code in codes:
+                output_alias = alias or code
+                aliases = code_aliases.setdefault(code, [])
+                if output_alias not in aliases:
+                    aliases.append(output_alias)
 
         if not code_aliases:
             logger.warning(f"Selected diagnosis codes file has no usable codes: {path}")
@@ -308,7 +416,7 @@ def _expand_selected_code_aliases(
     return out.drop(columns=["_DIAG_OUTPUT_ALIAS"])
 
 
-def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[str]]:
+def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[dict[str, str]]:
     """Load selected RS labels."""
     return _load_selection_values(
         selection_file=selected_rs_file,
@@ -318,7 +426,7 @@ def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[st
     )
 
 
-def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[set[str]]:
+def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[dict[str, str]]:
     """Load selected UP codes."""
     return _load_selection_values(
         selection_file=selected_up_file,
@@ -331,12 +439,24 @@ def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[set[st
 def _filter_if_selected(
     df: pd.DataFrame,
     column: str,
-    selected_values: Optional[set[str]],
+    selected_values: Optional[dict[str, str]],
 ) -> pd.DataFrame:
     """Filter a dataframe only when a selection file was provided."""
     if selected_values is None:
         return df
-    return df[df[column].isin(selected_values)].copy()
+
+    if column.upper() == "UP" or column.lower() == "up_c":
+        normalized = _normalize_up_codes(df[column])
+    else:
+        normalized = _normalize_rs_values(df[column])
+
+    mask = normalized.isin(selected_values.keys())
+    out = df[mask].copy()
+    if out.empty:
+        return out
+
+    out[column] = normalized[mask].map(selected_values).astype(str)
+    return out
 
 
 def run_incremental_diagnosis_pipeline_optimized(

@@ -14,10 +14,33 @@ from pipelines.demand.aggregation_optimized import (
 from pipelines.demand.transformations import prepare_visits_chunk
 from pipelines.diagnosis.aggregation_optimized import (
     build_daily_diagnosis_by_group_optimized,
+    build_daily_total_by_group_optimized,
     build_daily_total_general_optimized,
     build_diagnosis_wide_format_optimized,
 )
+from pipelines.diagnosis.incremental_optimized import (
+    _expand_selected_code_aliases as _expand_configured_selected_code_aliases,
+    _filter_if_selected as _filter_selected_diagnosis_geo,
+    _load_selected_codes as _load_configured_selected_codes,
+    _load_selected_rs as _load_selected_diagnosis_rs,
+    _load_selected_up as _load_selected_diagnosis_up,
+)
+from pipelines.demand.incremental_optimized import (
+    _filter_if_selected as _filter_selected_demand_geo,
+    _load_selected_rs as _load_selected_demand_rs,
+    _load_selected_up as _load_selected_demand_up,
+    _normalize_rs_values as _normalize_demand_rs_values,
+    _normalize_up_codes as _normalize_demand_up_codes,
+)
 from pipelines.shared.final_joiner import FinalDataJoiner
+from pipelines.shared.naming import (
+    DOMAIN_DIAGNOSIS,
+    GEO_RS,
+    GEO_UP,
+    VARIABLE_ICD10_3,
+    clean_geo_series,
+    feature_code,
+)
 from pipelines.shared.parquet_storage import drop_future_timestamp_rows
 
 
@@ -50,11 +73,29 @@ def run_sample_demand_pipeline(
     visits = _filter_by_date_range(visits, "DATA_VISITA", start_date, end_date)
     visits = visits[visits["DATA_VISITA"] < _tomorrow()].copy()
     visits["timestamp"] = visits["DATA_VISITA"]
+    selected_rs = _load_selected_demand_rs(_selection_path("selected_rs.csv", input_dir))
+    selected_up = _load_selected_demand_up(_selection_path("selected_up.csv", input_dir))
 
     cat_daily = build_daily_total_cat_optimized(visits)
     global_daily = build_daily_features_global_optimized(visits)
-    rs_daily = build_daily_features_by_group_optimized(visits, group_col="RS")
-    up_daily = build_daily_features_by_group_optimized(visits, group_col="UP")
+    rs_daily = build_daily_features_by_group_optimized(
+        _filter_selected_demand_geo(
+            visits,
+            "RS",
+            selected_rs,
+            _normalize_demand_rs_values,
+        ),
+        group_col="RS",
+    )
+    up_daily = build_daily_features_by_group_optimized(
+        _filter_selected_demand_geo(
+            visits,
+            "UP",
+            selected_up,
+            _normalize_demand_up_codes,
+        ),
+        group_col="UP",
+    )
 
     incremental_dir = output_dir / "demand_pipeline" / "incremental"
     _save_parquet(_with_timestamp_column(cat_daily), incremental_dir / "demand_cat_daily.parquet")
@@ -77,14 +118,22 @@ def run_sample_diagnosis_pipeline(
     """Run the diagnosis pipeline with local synthetic input data."""
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
-    _ensure_sample_files(input_dir, ["up_rs", "diagnosis", "selected_codes"])
+    _ensure_sample_files(input_dir, ["up_rs", "diagnosis"])
 
     up_rs = _load_up_rs(input_dir)
     diagnosis = pd.read_csv(
         input_dir / SAMPLE_INPUT_FILES["diagnosis"],
         dtype={"up_c": str, "problema_salut_c": str},
     )
-    selected_codes = _load_selected_codes(input_dir)
+    selected_codes = _load_configured_selected_codes(
+        _selection_path(
+            "selected_diagnosis_codes.csv",
+            input_dir,
+            sample_fallback=SAMPLE_INPUT_FILES["selected_codes"],
+        )
+    ) or {}
+    selected_rs = _load_selected_diagnosis_rs(_selection_path("selected_rs.csv", input_dir))
+    selected_up = _load_selected_diagnosis_up(_selection_path("selected_up.csv", input_dir))
 
     diagnosis["timestamp"] = pd.to_datetime(
         diagnosis["data_visita"],
@@ -105,21 +154,39 @@ def run_sample_diagnosis_pipeline(
     diagnosis["RS"] = diagnosis["RS"].fillna("UNKNOWN")
 
     total_daily = build_daily_total_general_optimized(diagnosis)
-    code_diagnosis = _expand_selected_code_aliases(diagnosis, selected_codes)
+    rs_total = build_daily_total_by_group_optimized(
+        _filter_selected_diagnosis_geo(diagnosis, "RS", selected_rs),
+        group_col="RS",
+        group_label="RS",
+    )
+    up_total = build_daily_total_by_group_optimized(
+        _filter_selected_diagnosis_geo(diagnosis, "up_c", selected_up),
+        group_col="up_c",
+        group_label="UP",
+    )
+    code_diagnosis = _expand_configured_selected_code_aliases(diagnosis, selected_codes)
     code_daily = build_diagnosis_wide_format_optimized(code_diagnosis)
-    rs_long = build_daily_diagnosis_by_group_optimized(code_diagnosis, group_col="RS")
-    up_long = build_daily_diagnosis_by_group_optimized(code_diagnosis, group_col="up_c")
+    rs_long = build_daily_diagnosis_by_group_optimized(
+        _filter_selected_diagnosis_geo(code_diagnosis, "RS", selected_rs),
+        group_col="RS",
+    )
+    up_long = build_daily_diagnosis_by_group_optimized(
+        _filter_selected_diagnosis_geo(code_diagnosis, "up_c", selected_up),
+        group_col="up_c",
+    )
 
     rs_wide = _pivot_diagnosis_group(rs_long, group_column="DIAG_RS", label="RS")
     up_wide = _pivot_diagnosis_group(up_long, group_column="DIAG_up_c", label="UP")
 
     incremental_dir = output_dir / "diagnosis_pipeline" / "incremental"
     _save_parquet(_with_timestamp_column(total_daily), incremental_dir / "diagnosis_total_daily.parquet")
+    _save_parquet(_with_timestamp_column(rs_total), incremental_dir / "diagnosis_rs_total_daily.parquet")
+    _save_parquet(_with_timestamp_column(up_total), incremental_dir / "diagnosis_up_total_daily.parquet")
     _save_parquet(_with_timestamp_column(code_daily), incremental_dir / "diagnosis_code_daily.parquet")
     _save_parquet(rs_long, incremental_dir / "diagnosis_rs_long.parquet")
     _save_parquet(up_long, incremental_dir / "diagnosis_up_long.parquet")
 
-    final = _combine_wide_frames([total_daily, code_daily, rs_wide, up_wide])
+    final = _combine_wide_frames([total_daily, rs_total, up_total, code_daily, rs_wide, up_wide])
     final_path = output_dir / "diagnosis_pipeline" / "finals" / "diagnosis_final.parquet"
     _save_parquet(final, final_path)
     return final_path
@@ -162,6 +229,25 @@ def _load_up_rs(input_dir: Path) -> pd.DataFrame:
     return up_rs
 
 
+def _selection_path(
+    filename: str,
+    input_dir: Path,
+    sample_fallback: str | None = None,
+) -> Path:
+    """Prefer shared project selections, falling back to sample-local files."""
+    candidates = [
+        Path.cwd() / "selections" / filename,
+        input_dir / filename,
+    ]
+    if sample_fallback:
+        candidates.append(input_dir / sample_fallback)
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def _load_selected_codes(input_dir: Path) -> dict[str, list[str]]:
     path = input_dir / SAMPLE_INPUT_FILES["selected_codes"]
     if not path.exists():
@@ -171,7 +257,8 @@ def _load_selected_codes(input_dir: Path) -> dict[str, list[str]]:
         return {}
 
     aliases: dict[str, list[str]] = {}
-    alias_col = selected.columns[1] if len(selected.columns) > 1 else None
+    column_lookup = {str(col).strip().lower(): col for col in selected.columns}
+    alias_col = column_lookup.get("feature_name")
     for _, row in selected.iterrows():
         code = _normalize_diag_codes(pd.Series([row.iloc[0]])).iloc[0]
         if pd.isna(code) or not code:
@@ -292,14 +379,13 @@ def _pivot_diagnosis_group(
 ) -> pd.DataFrame:
     out = df.copy()
     out[timestamp_col] = pd.to_datetime(out[timestamp_col]).dt.floor("D")
-    out[group_column] = out[group_column].fillna("UNKNOWN").astype(str)
+    geo_level = GEO_UP if label.upper() == GEO_UP else GEO_RS
+    out[group_column] = clean_geo_series(out[group_column], geo_level)
     out["DIAG_DIAG_CODE"] = out["DIAG_DIAG_CODE"].fillna("UNKNOWN").astype(str)
-    out["feature"] = (
-        f"DIAG_{label}_"
-        + out["DIAG_DIAG_CODE"]
-        + "_"
-        + out[group_column]
-    )
+    out["feature"] = [
+        feature_code(DOMAIN_DIAGNOSIS, VARIABLE_ICD10_3, code, geo_level, geo)
+        for code, geo in zip(out["DIAG_DIAG_CODE"], out[group_column])
+    ]
 
     wide = out.pivot_table(
         index=timestamp_col,
@@ -318,4 +404,3 @@ def _save_parquet(df: pd.DataFrame, path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df = drop_future_timestamp_rows(df, "timestamp")
     df.to_parquet(path, compression="snappy", index=False)
-

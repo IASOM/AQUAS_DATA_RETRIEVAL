@@ -7,6 +7,7 @@ import warnings
 
 from .parquet_storage import drop_future_timestamp_rows
 from .imputation import write_imputation_metadata_files
+from .naming import DOMAIN_DEMAND, DOMAIN_DIAGNOSIS, canonicalize_feature_name
 
 warnings.filterwarnings("ignore")
 
@@ -91,17 +92,18 @@ class FinalDataJoiner:
                 diagnosis_df[self.timestamp_col]
             )
 
-        # Rename columns to avoid conflicts
-        demand_cols = {
-            col: f"{demand_prefix}_{col}"
-            for col in demand_df.columns
-            if col != self.timestamp_col
-        }
-        diagnosis_cols = {
-            col: f"{diagnosis_prefix}_{col}"
-            for col in diagnosis_df.columns
-            if col != self.timestamp_col
-        }
+        # Rename legacy columns to the canonical Qualud grammar, while leaving
+        # already-canonical names untouched.
+        demand_cols = self._build_join_rename_map(
+            demand_df,
+            domain=DOMAIN_DEMAND,
+            fallback_prefix=demand_prefix,
+        )
+        diagnosis_cols = self._build_join_rename_map(
+            diagnosis_df,
+            domain=DOMAIN_DIAGNOSIS,
+            fallback_prefix=diagnosis_prefix,
+        )
 
         demand_df = demand_df.rename(columns=demand_cols)
         diagnosis_df = diagnosis_df.rename(columns=diagnosis_cols)
@@ -237,6 +239,25 @@ class FinalDataJoiner:
             logger.error(f"Error loading {file_path}: {e}")
             return pd.DataFrame()
 
+    def _build_join_rename_map(
+        self,
+        df: pd.DataFrame,
+        domain: str,
+        fallback_prefix: str,
+    ) -> dict[str, str]:
+        """Return output column names for a final join."""
+        rename_map = {}
+        for col in df.columns:
+            if col == self.timestamp_col:
+                continue
+
+            canonical = canonicalize_feature_name(col, domain)
+            if canonical != col or canonical.startswith(f"{domain}__"):
+                rename_map[col] = canonical
+            else:
+                rename_map[col] = f"{fallback_prefix}_{col}"
+        return rename_map
+
 
 class IncrementalFinalJoiner:
     """Join incremental parquet files from both pipelines."""
@@ -311,16 +332,16 @@ class IncrementalFinalJoiner:
                 df = df.reset_index()
 
         # Rename columns
-        demand_cols = {
-            col: f"{demand_prefix}_{col}"
-            for col in demand_df.columns
-            if col != self.timestamp_col
-        }
-        diagnosis_cols = {
-            col: f"{diagnosis_prefix}_{col}"
-            for col in diagnosis_df.columns
-            if col != self.timestamp_col
-        }
+        demand_cols = self._build_join_rename_map(
+            demand_df,
+            domain=DOMAIN_DEMAND,
+            fallback_prefix=demand_prefix,
+        )
+        diagnosis_cols = self._build_join_rename_map(
+            diagnosis_df,
+            domain=DOMAIN_DIAGNOSIS,
+            fallback_prefix=diagnosis_prefix,
+        )
 
         demand_df = demand_df.rename(columns=demand_cols)
         diagnosis_df = diagnosis_df.rename(columns=diagnosis_cols)
@@ -371,3 +392,22 @@ class IncrementalFinalJoiner:
                 logger.error(f"Error loading {pf}: {e}")
 
         return dfs
+
+    def _build_join_rename_map(
+        self,
+        df: pd.DataFrame,
+        domain: str,
+        fallback_prefix: str,
+    ) -> dict[str, str]:
+        """Return output column names for an incremental join."""
+        rename_map = {}
+        for col in df.columns:
+            if col == self.timestamp_col:
+                continue
+
+            canonical = canonicalize_feature_name(col, domain)
+            if canonical != col or canonical.startswith(f"{domain}__"):
+                rename_map[col] = canonical
+            else:
+                rename_map[col] = f"{fallback_prefix}_{col}"
+        return rename_map

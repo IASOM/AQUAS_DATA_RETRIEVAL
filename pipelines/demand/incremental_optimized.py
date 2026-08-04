@@ -1,6 +1,7 @@
 ﻿"""Optimized demand pipeline main runner with Parquet storage."""
 import pandas as pd
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -36,12 +37,64 @@ def _normalize_rs_values(values: pd.Series) -> pd.Series:
     return values.astype("string").str.strip().str.upper()
 
 
+def _normalize_geo_alias(value, fallback: str) -> str:
+    """Normalize a configured territorial subset identifier for output names."""
+    if pd.isna(value):
+        return fallback
+
+    token = str(value).strip()
+    if not token:
+        return fallback
+
+    token = re.sub(r"[^0-9A-Za-z]+", "_", token).strip("_").upper()
+    return token or fallback
+
+
+def _selection_map_from_df(
+    selection_df: pd.DataFrame,
+    normalizer,
+) -> dict[str, str]:
+    """Build source-value -> output-geo-id mapping from a selection CSV."""
+    if selection_df.empty:
+        return {}
+
+    columns = list(selection_df.columns)
+    column_lookup = {str(col).strip().lower(): col for col in columns}
+    source_col = (
+        column_lookup.get("rs")
+        or column_lookup.get("up")
+        or column_lookup.get("value")
+        or column_lookup.get("source_value")
+        or (columns[1] if len(columns) > 1 else columns[0])
+    )
+    alias_col = (
+        column_lookup.get("geo_id")
+        or column_lookup.get("id")
+        or column_lookup.get("subset_id")
+        or (columns[0] if len(columns) > 1 else source_col)
+    )
+
+    mapping = {}
+    for _, row in selection_df.iterrows():
+        source_values = normalizer(pd.Series([row[source_col]])).dropna()
+        if source_values.empty:
+            continue
+
+        source = str(source_values.iloc[0])
+        if not source:
+            continue
+
+        alias = _normalize_geo_alias(row[alias_col], fallback=source)
+        mapping[source] = alias
+    return mapping
+
+
 def _load_selection_values(
     selection_file: Optional[str | Path],
     filename: str,
     label: str,
     normalizer,
-) -> Optional[set[str]]:
+) -> Optional[dict[str, str]]:
     """Load a one-column shared selection CSV."""
     candidates = []
     if selection_file:
@@ -68,9 +121,8 @@ def _load_selection_values(
             continue
 
         found_file = True
-        selection_df = pd.read_csv(path)
-        values = set(normalizer(selection_df.iloc[:, 0]).dropna())
-        values.discard("")
+        selection_df = pd.read_csv(path, dtype=str)
+        values = _selection_map_from_df(selection_df, normalizer)
         if not values:
             logger.warning(f"Selected demand {label} file is empty: {path}")
             continue
@@ -92,7 +144,7 @@ def _load_selection_values(
     return None
 
 
-def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[str]]:
+def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[dict[str, str]]:
     """Load selected RS labels for demand grouped outputs."""
     return _load_selection_values(
         selection_file=selected_rs_file,
@@ -102,7 +154,7 @@ def _load_selected_rs(selected_rs_file: Optional[str | Path]) -> Optional[set[st
     )
 
 
-def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[set[str]]:
+def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[dict[str, str]]:
     """Load selected UP codes for demand grouped outputs."""
     return _load_selection_values(
         selection_file=selected_up_file,
@@ -115,7 +167,7 @@ def _load_selected_up(selected_up_file: Optional[str | Path]) -> Optional[set[st
 def _filter_if_selected(
     df: pd.DataFrame,
     column: str,
-    selected_values: Optional[set[str]],
+    selected_values: Optional[dict[str, str]],
     normalizer,
 ) -> pd.DataFrame:
     """Filter a dataframe only when a selection file contains values."""
@@ -123,7 +175,13 @@ def _filter_if_selected(
         return df
 
     normalized = normalizer(df[column])
-    return df[normalized.isin(selected_values)].copy()
+    mask = normalized.isin(selected_values.keys())
+    out = df[mask].copy()
+    if out.empty:
+        return out
+
+    out[column] = normalized[mask].map(selected_values).astype(str)
+    return out
 
 
 def run_incremental_pipeline_optimized(

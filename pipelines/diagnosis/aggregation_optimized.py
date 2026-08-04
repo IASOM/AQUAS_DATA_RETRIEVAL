@@ -12,6 +12,16 @@ from pipelines.shared.imputation import (
     drop_imputed_rows,
     impute_tail_to_date,
 )
+from pipelines.shared.naming import (
+    DOMAIN_DIAGNOSIS,
+    GEO_RS,
+    GEO_UP,
+    VARIABLE_ICD10_3,
+    canonicalize_feature_name,
+    clean_geo_series,
+    feature_code,
+    total_code,
+)
 
 logger = logging.getLogger(__name__)
 MAX_DIAGNOSIS_FEATURES = int(os.getenv("MAX_DIAGNOSIS_FEATURES", "200000"))
@@ -116,7 +126,7 @@ def build_daily_total_general_optimized(
 
     # Vectorized groupby
     result = df.groupby(date_column, observed=True)[value_col].sum().to_frame()
-    result.columns = ["DIAG_TOTAL"]
+    result.columns = [total_code(DOMAIN_DIAGNOSIS)]
 
     return result
 
@@ -136,13 +146,16 @@ def build_daily_total_by_group_optimized(
     """
     df = df.copy()
     df[date_column] = pd.to_datetime(df[date_column]).dt.floor("D")
-    df[group_col] = df[group_col].fillna("UNKNOWN").astype(str)
+    geo_level = GEO_UP if group_label.upper() == GEO_UP else GEO_RS
+    df[group_col] = clean_geo_series(df[group_col], geo_level)
 
     grouped = (
         df.groupby([date_column, group_col], as_index=False, observed=True)[value_col]
         .sum()
     )
-    grouped["feature"] = f"DIAG_TOTAL_{group_label}_" + grouped[group_col].astype(str)
+    grouped["feature"] = grouped[group_col].map(
+        lambda geo: total_code(DOMAIN_DIAGNOSIS, geo_level, geo)
+    )
     _validate_feature_count(
         grouped["feature"].nunique(),
         f"diagnosis total {group_label} features",
@@ -194,7 +207,10 @@ def build_diagnosis_wide_format_optimized(
     )
 
     # Rename columns
-    result.columns = [f"DIAG_CODE_{col}" for col in result.columns]
+    result.columns = [
+        feature_code(DOMAIN_DIAGNOSIS, VARIABLE_ICD10_3, col)
+        for col in result.columns
+    ]
 
     result.index = pd.to_datetime(result.index)
 
@@ -384,31 +400,43 @@ def _build_diagnosis_wide_final(
             raise ValueError(f"Missing timestamp column: {timestamp_col}")
 
     out[timestamp_col] = pd.to_datetime(out[timestamp_col]).dt.floor("D")
+    out = out.rename(
+        columns={
+            col: canonicalize_feature_name(col, DOMAIN_DIAGNOSIS)
+            for col in out.columns
+            if col != timestamp_col
+        }
+    )
 
     frames = []
     wide_cols = [
         col
         for col in out.columns
         if (
-            col not in IMPUTATION_COLUMNS
-            and (
+                col not in IMPUTATION_COLUMNS
+                and (
                 col == "DIAG_TOTAL"
                 or col.startswith("DIAG_TOTAL_")
                 or col.startswith("DIAG_CODE_")
+                or col.startswith(f"{DOMAIN_DIAGNOSIS}__")
             )
         )
     ]
     if wide_cols:
         frames.append(_sum_numeric_by_timestamp(out, wide_cols, timestamp_col))
 
-    has_code_wide = any(col.startswith("DIAG_CODE_") for col in out.columns)
+    has_code_wide = any(
+        col.startswith("DIAG_CODE_")
+        or col.startswith(f"{DOMAIN_DIAGNOSIS}__{VARIABLE_ICD10_3}__")
+        for col in out.columns
+    )
     if not has_code_wide and {"DIAG_DIAG_CODE", "DIAG_COUNT"}.issubset(out.columns):
         frames.append(
             _pivot_diagnosis_long(
                 out,
                 code_col="DIAG_DIAG_CODE",
                 value_col="DIAG_COUNT",
-                prefix="DIAG_CODE",
+                prefix=VARIABLE_ICD10_3,
                 timestamp_col=timestamp_col,
             )
         )
@@ -467,7 +495,9 @@ def _pivot_diagnosis_long(
 ) -> pd.DataFrame:
     out = df[[timestamp_col, code_col, value_col]].dropna(subset=[code_col]).copy()
     out[value_col] = pd.to_numeric(out[value_col], errors="coerce").fillna(0)
-    out["feature"] = prefix + "_" + out[code_col].astype(str)
+    out["feature"] = out[code_col].map(
+        lambda code: feature_code(DOMAIN_DIAGNOSIS, prefix, code)
+    )
     _validate_feature_count(out["feature"].nunique(), "diagnosis code features")
 
     wide = out.pivot_table(
@@ -492,12 +522,12 @@ def _pivot_diagnosis_group(
         subset=[group_col, "DIAG_DIAG_CODE"]
     ).copy()
     out["count"] = pd.to_numeric(out["count"], errors="coerce").fillna(0)
-    out["feature"] = (
-        f"DIAG_{label}_"
-        + out["DIAG_DIAG_CODE"].astype(str)
-        + "_"
-        + out[group_col].astype(str)
-    )
+    geo_level = GEO_UP if label.upper() == GEO_UP else GEO_RS
+    out[group_col] = clean_geo_series(out[group_col], geo_level)
+    out["feature"] = [
+        feature_code(DOMAIN_DIAGNOSIS, VARIABLE_ICD10_3, code, geo_level, geo)
+        for code, geo in zip(out["DIAG_DIAG_CODE"], out[group_col])
+    ]
     _validate_feature_count(out["feature"].nunique(), f"diagnosis {label} features")
 
     wide = out.pivot_table(

@@ -11,6 +11,15 @@ from pipelines.shared.imputation import (
     drop_imputed_rows,
     impute_tail_to_date,
 )
+from pipelines.shared.naming import (
+    DOMAIN_DEMAND,
+    GEO_RS,
+    GEO_UP,
+    canonicalize_feature_name,
+    clean_geo_series,
+    feature_code,
+    total_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +50,7 @@ def build_daily_total_cat_optimized(
 
     # Vectorized groupby - much faster than iterating
     result = df.groupby(date_column, observed=True)[value_col].sum().to_frame()
-    result.columns = ["DEMANDA_TOTAL"]
+    result.columns = [total_code(DOMAIN_DEMAND)]
 
     return result
 
@@ -50,12 +59,12 @@ def build_daily_features_global_optimized(
     df: pd.DataFrame,
     date_column: str = "timestamp",
     value_col: str = "counts",
-    prefix: str = "demanda",
+    prefix: str = DOMAIN_DEMAND,
 ) -> pd.DataFrame:
     """
     Build daily categorical totals without RS/UP grouping.
 
-    For example: demanda_SERVEI_CODI_INF, demanda_TIPUS_CLASS_C9C.
+    For example: DEMAND__SERVEI_CODI__INF, DEMAND__TIPUS_CLASS__C9C.
     These columns represent Catalunya/global totals for each category value.
     """
     df = df.copy()
@@ -81,7 +90,9 @@ def build_daily_features_global_optimized(
     for var in categorical_vars:
         tmp = df[[date_column, var, value_col]].copy()
         tmp[var] = tmp[var].fillna("NA").astype(str).str.strip().replace("", "NA")
-        tmp["feature"] = f"{prefix}_{var}_" + tmp[var]
+        tmp["feature"] = tmp[var].map(
+            lambda category: feature_code(prefix, var, category)
+        )
         tmp = (
             tmp.groupby([date_column, "feature"], as_index=False, observed=True)[
                 value_col
@@ -111,7 +122,7 @@ def build_daily_features_by_group_optimized(
     group_col: str,
     date_column: str = "timestamp",
     value_col: str = "counts",
-    prefix: str = "demanda",
+    prefix: str = DOMAIN_DEMAND,
 ) -> pd.DataFrame:
     """
     Efficiently build daily features grouped by category using vectorized operations.
@@ -174,15 +185,17 @@ def build_daily_features_by_group_optimized(
         tmp = df[[date_column, group_col, var, value_col]].copy()
 
         # Fast string cleaning
-        tmp[group_col] = (
-            tmp[group_col].fillna("NA").astype(str).str.strip().replace("", "NA")
-        )
+        geo_level = GEO_UP if group_col.upper() == GEO_UP else GEO_RS
+        tmp[group_col] = clean_geo_series(tmp[group_col], geo_level)
         tmp[var] = (
             tmp[var].fillna("NA").astype(str).str.strip().replace("", "NA")
         )
 
         # Vectorized column creation
-        tmp["feature"] = f"{prefix}_{var}_" + tmp[var] + "_" + tmp[group_col]
+        tmp["feature"] = [
+            feature_code(prefix, var, category, geo_level, geo)
+            for category, geo in zip(tmp[var], tmp[group_col])
+        ]
 
         # Efficient groupby
         tmp = (
@@ -196,8 +209,11 @@ def build_daily_features_by_group_optimized(
 
     # Total per group
     tmp_total = df[[date_column, group_col, value_col]].copy()
-    tmp_total[group_col] = tmp_total[group_col].astype(str).str.strip()
-    tmp_total["feature"] = f"{prefix}__TOTAL_{group_col}_" + tmp_total[group_col]
+    geo_level = GEO_UP if group_col.upper() == GEO_UP else GEO_RS
+    tmp_total[group_col] = clean_geo_series(tmp_total[group_col], geo_level)
+    tmp_total["feature"] = tmp_total[group_col].map(
+        lambda geo: total_code(prefix, geo_level, geo)
+    )
     tmp_total = (
         tmp_total.groupby([date_column, "feature"], as_index=False, observed=True)[
             value_col
@@ -376,6 +392,13 @@ def _build_wide_final_by_timestamp(
             raise ValueError(f"Missing timestamp column: {timestamp_col}")
 
     out[timestamp_col] = pd.to_datetime(out[timestamp_col]).dt.floor("D")
+    out = out.rename(
+        columns={
+            col: canonicalize_feature_name(col, DOMAIN_DEMAND)
+            for col in out.columns
+            if col != timestamp_col
+        }
+    )
 
     value_cols = [
         col
