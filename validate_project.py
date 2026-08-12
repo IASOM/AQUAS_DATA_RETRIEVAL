@@ -99,7 +99,10 @@ def validate_environment():
     
     try:
         import pyodbc
-        print(f"   ✓ pyodbc {pyodbc.__version__}")
+        pyodbc_version = getattr(pyodbc, "version", None) or getattr(
+            pyodbc, "__version__", "installed"
+        )
+        print(f"   ✓ pyodbc {pyodbc_version}")
     except ImportError:
         print("   ✗ pyodbc not installed")
         checks.append(False)

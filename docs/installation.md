@@ -21,7 +21,9 @@ Edit `.env` with the real connection and local paths.
 ## Main Environment Variables
 
 ```env
+DB_DRIVER=ODBC Driver 18 for SQL Server
 DB_SERVER=synw-aquas.sql.azuresynapse.net
+DB_PORT=1433
 DB_DATABASE=aquas
 AUTH_MODE=ActiveDirectoryIntegrated
 BASE_DIR=C:/path/to/AQUAS_DATA_RETRIEVAL
@@ -32,6 +34,13 @@ SELECTED_DIAGNOSIS_CODES_FILE=C:/path/to/AQUAS_DATA_RETRIEVAL/selections/selecte
 MAX_DIAGNOSIS_FEATURES=200000
 LOG_LEVEL=INFO
 ```
+
+For manual runs, `AUTH_MODE=ActiveDirectoryInteractive` can be useful when
+Azure AD tokens expire because the ODBC driver can request a fresh sign-in. For
+scheduled or long unattended runs, prefer a service identity provided by the
+database administrators and set `AUTH_MODE=ActiveDirectoryPassword` with
+`DB_UID` and `DB_PASSWORD`, or set `DB_CONNECTION_STRING` to the full approved
+ODBC connection string.
 
 `UP_RS_FILE` must point to the Excel file containing the `UP per RS` sheet. The pipeline uses it to map UP codes to RS values.
 
