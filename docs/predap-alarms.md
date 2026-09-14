@@ -12,6 +12,9 @@ Objectius:
 - Evitar alarmes sorolloses en unitats amb molt poc volum.
 - Separar increments grans pero plausibles d'increments anomalament grans.
 
+Nota de nomenclatura: "5% superior" vol dir tall al percentil 95 (`p95`).
+"25% superior" vol dir tall al percentil 75 (`p75`).
+
 ## Fitxer d'entrada
 
 El calcul s'ha de fer sobre un Parquet final observat, preferentment:
@@ -266,6 +269,12 @@ Si vols calcular nomes diagnostics:
 
 ```powershell
 python .\scripts\calculate_predap_alarm_thresholds.py --input .\data\diagnosis_pipeline\finals\diagnosis_final.parquet --output .\predap_alarm_thresholds_diagnosis.csv
+```
+
+Si vols calcular el 25% superior en lloc del 5% superior:
+
+```powershell
+python .\scripts\calculate_predap_alarm_thresholds.py --input .\data\finals\demand_diagnosis_joined.parquet --output .\predap_alarm_thresholds_top25.csv --upper-tail-pct 25
 ```
 
 ```python

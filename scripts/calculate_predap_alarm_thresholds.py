@@ -36,6 +36,15 @@ def main() -> int:
         default=5,
         help="Number of observed historical years used for calibration.",
     )
+    parser.add_argument(
+        "--upper-tail-pct",
+        type=float,
+        default=5.0,
+        help=(
+            "Upper tail percentage used for volume thresholds. Use 5 for p95, "
+            "25 for p75."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -43,14 +52,23 @@ def main() -> int:
             f"Input Parquet not found: {args.input}. Run the pipelines first."
         )
 
-    thresholds = calculate_thresholds(args.input, years=args.years)
+    thresholds = calculate_thresholds(
+        args.input,
+        years=args.years,
+        upper_tail_pct=args.upper_tail_pct,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     thresholds.to_csv(args.output, index=False)
     print(f"Wrote {len(thresholds)} rows to {args.output}")
     return 0
 
 
-def calculate_thresholds(input_file: Path, years: int = 5) -> pd.DataFrame:
+def calculate_thresholds(
+    input_file: Path,
+    years: int = 5,
+    upper_tail_pct: float = 5.0,
+) -> pd.DataFrame:
+    quantile, percentile_label, tail_label = _upper_tail_labels(upper_tail_pct)
     df = pd.read_parquet(input_file)
     if "timestamp" not in df.columns:
         raise ValueError(f"Missing timestamp column in {input_file}")
@@ -85,8 +103,8 @@ def calculate_thresholds(input_file: Path, years: int = 5) -> pd.DataFrame:
         if series.empty:
             continue
 
-        n_p95 = float(series.quantile(0.95))
-        top5 = series[series >= n_p95]
+        n_percentile = float(series.quantile(quantile))
+        top_tail = series[series >= n_percentile]
         parsed = _parse_unit_name(unit)
         row = {
             "unit": unit,
@@ -94,15 +112,24 @@ def calculate_thresholds(input_file: Path, years: int = 5) -> pd.DataFrame:
             "last_observed_date": last_day.date().isoformat(),
             "history_start_date": start_day.date().isoformat(),
             "history_days": int(series.shape[0]),
-            "n_p95_5y": n_p95,
-            "n_top5_days_5y": int(top5.shape[0]),
-            "n_top5_sum_5y": float(top5.sum()),
-            "n_top5_mean_5y": float(top5.mean()) if not top5.empty else 0.0,
+            f"n_{percentile_label}_5y": n_percentile,
+            f"n_{tail_label}_days_5y": int(top_tail.shape[0]),
+            f"n_{tail_label}_sum_5y": float(top_tail.sum()),
+            f"n_{tail_label}_mean_5y": (
+                float(top_tail.mean()) if not top_tail.empty else 0.0
+            ),
             "n_median_5y": float(series.median()),
         }
 
         for window in WINDOWS:
-            _add_window_thresholds(row, series, window)
+            _add_window_thresholds(
+                row,
+                series,
+                window,
+                quantile=quantile,
+                percentile_label=percentile_label,
+                tail_label=tail_label,
+            )
 
         row["quality_flag"] = _quality_flag(series)
         rows.append(row)
@@ -161,17 +188,35 @@ def _parse_unit_name(unit: str) -> dict[str, str]:
     }
 
 
+def _upper_tail_labels(upper_tail_pct: float) -> tuple[float, str, str]:
+    if upper_tail_pct <= 0 or upper_tail_pct >= 100:
+        raise ValueError("--upper-tail-pct must be greater than 0 and less than 100")
+
+    quantile = 1 - (upper_tail_pct / 100)
+    percentile = quantile * 100
+    percentile_label = _number_label(f"p{percentile:g}")
+    tail_label = _number_label(f"top{upper_tail_pct:g}")
+    return quantile, percentile_label, tail_label
+
+
+def _number_label(value: str) -> str:
+    return value.replace(".", "_")
+
+
 def _add_window_thresholds(
     row: dict[str, object],
     series: pd.Series,
     window: int,
+    quantile: float,
+    percentile_label: str,
+    tail_label: str,
 ) -> None:
     recent = series.rolling(window, min_periods=window).sum()
     previous = recent.shift(window)
-    n_p95_window = (
-        float(recent.dropna().quantile(0.95)) if not recent.dropna().empty else 0.0
+    n_percentile_window = (
+        float(recent.dropna().quantile(quantile)) if not recent.dropna().empty else 0.0
     )
-    top5_window = recent[recent >= n_p95_window].dropna()
+    top_tail_window = recent[recent >= n_percentile_window].dropna()
     observed_previous = previous.dropna()
     min_baseline = (
         max(5.0, float(observed_previous.quantile(0.25)))
@@ -188,15 +233,15 @@ def _add_window_thresholds(
         float(positive_growth.quantile(0.99)) if not positive_growth.empty else 0.0
     )
 
-    row[f"n_p95_{window}d_5y"] = n_p95_window
-    row[f"n_top5_windows_{window}d_5y"] = int(top5_window.shape[0])
-    row[f"n_top5_sum_{window}d_5y"] = float(top5_window.sum())
-    row[f"n_top5_mean_{window}d_5y"] = (
-        float(top5_window.mean()) if not top5_window.empty else 0.0
+    row[f"n_{percentile_label}_{window}d_5y"] = n_percentile_window
+    row[f"n_{tail_label}_windows_{window}d_5y"] = int(top_tail_window.shape[0])
+    row[f"n_{tail_label}_sum_{window}d_5y"] = float(top_tail_window.sum())
+    row[f"n_{tail_label}_mean_{window}d_5y"] = (
+        float(top_tail_window.mean()) if not top_tail_window.empty else 0.0
     )
     row[f"growth_yellow_{window}d"] = float(max(BASE_YELLOW[window], p95_growth))
     row[f"growth_red_{window}d"] = float(max(BASE_RED[window], p99_growth))
-    row[f"min_recent_{window}d"] = float(max(10.0, 0.25 * n_p95_window))
+    row[f"min_recent_{window}d"] = float(max(10.0, 0.25 * n_percentile_window))
     row[f"min_baseline_{window}d"] = min_baseline
 
 
