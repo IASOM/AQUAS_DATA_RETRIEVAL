@@ -213,6 +213,24 @@ missing_recent_data
 
 ## Pseudocodi de calcul
 
+El repo inclou una versio executable d'aquest calcul:
+
+```powershell
+python .\scripts\calculate_predap_alarm_thresholds.py --input .\data\finals\demand_diagnosis_joined.parquet --output .\predap_alarm_thresholds.csv
+```
+
+Si vols calcular nomes demanda:
+
+```powershell
+python .\scripts\calculate_predap_alarm_thresholds.py --input .\data\demand_pipeline\finals\demand_final.parquet --output .\predap_alarm_thresholds_demand.csv
+```
+
+Si vols calcular nomes diagnostics:
+
+```powershell
+python .\scripts\calculate_predap_alarm_thresholds.py --input .\data\diagnosis_pipeline\finals\diagnosis_final.parquet --output .\predap_alarm_thresholds_diagnosis.csv
+```
+
 ```python
 import pandas as pd
 
@@ -289,4 +307,3 @@ Per arrencar configuracio:
 - Usar 7 i 14 dies com a alarmes rapides, pero amb `min_recent` activat.
 - Usar 182 i 365 dies com a alarmes de tendencia, no com a urgencia.
 - Revisar manualment les unitats amb `quality_flag != ok`.
-
