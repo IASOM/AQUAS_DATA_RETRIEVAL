@@ -13,6 +13,8 @@ from pipelines.shared import (
     get_data_for_year,
     get_incremental_processing_window,
 )
+from pipelines.shared.imputation import drop_imputed_rows
+from pipelines.shared.naming import DOMAIN_DEMAND, GEO_RS, GEO_UP, total_code
 from pipelines.shared.parquet_storage import ParquetIncrementalManager, ParquetFinalStore
 from .aggregation_optimized import (
     build_daily_total_cat_optimized,
@@ -184,6 +186,234 @@ def _filter_if_selected(
     return out
 
 
+def _split_into_six_month_ranges(
+    start: pd.Timestamp,
+    end_exclusive: pd.Timestamp,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    ranges = []
+    cursor = pd.to_datetime(start).normalize()
+    end_exclusive = pd.to_datetime(end_exclusive).normalize()
+    while cursor < end_exclusive:
+        next_cursor = min(cursor + pd.DateOffset(months=6), end_exclusive)
+        ranges.append((cursor, next_cursor))
+        cursor = next_cursor
+    return ranges
+
+
+def _existing_observed_range(
+    final_store: ParquetFinalStore,
+    timestamp_col: str = "timestamp",
+) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
+    existing = final_store.load_final()
+    if existing.empty or timestamp_col not in existing.columns:
+        return None
+
+    existing = drop_imputed_rows(existing, timestamp_col=timestamp_col)
+    if existing.empty:
+        return None
+
+    timestamps = pd.to_datetime(existing[timestamp_col], errors="coerce").dropna()
+    if timestamps.empty:
+        return None
+
+    return timestamps.min().normalize(), timestamps.max().normalize()
+
+
+def _missing_selected_geos(
+    final_store: ParquetFinalStore,
+    selected_rs: Optional[dict[str, str]],
+    selected_up: Optional[dict[str, str]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    existing = final_store.load_final()
+    if existing.empty:
+        return {}, {}
+
+    columns = set(existing.columns)
+    missing_rs = {
+        source: alias
+        for source, alias in (selected_rs or {}).items()
+        if total_code(DOMAIN_DEMAND, GEO_RS, alias) not in columns
+    }
+    missing_up = {
+        source: alias
+        for source, alias in (selected_up or {}).items()
+        if total_code(DOMAIN_DEMAND, GEO_UP, alias) not in columns
+    }
+    return missing_rs, missing_up
+
+
+def _source_ups_for_selected_rs(
+    up_rs: pd.DataFrame,
+    selected_rs: dict[str, str],
+) -> list[str]:
+    if not selected_rs or not {"Codi UP", "RS"}.issubset(up_rs.columns):
+        return []
+
+    lookup = up_rs[["Codi UP", "RS"]].copy()
+    lookup["Codi UP"] = _normalize_up_codes(lookup["Codi UP"])
+    lookup["RS"] = _normalize_rs_values(lookup["RS"])
+    return (
+        lookup.loc[lookup["RS"].isin(selected_rs.keys()), "Codi UP"]
+        .dropna()
+        .drop_duplicates()
+        .astype(str)
+        .tolist()
+    )
+
+
+def _metadata_snapshot(manager: ParquetIncrementalManager) -> Optional[pd.DataFrame]:
+    if not manager.metadata_file.exists():
+        return None
+    try:
+        return pd.read_parquet(manager.metadata_file)
+    except Exception as exc:
+        logger.warning(f"Could not snapshot processing metadata: {exc}")
+        return None
+
+
+def _restore_metadata_snapshot(
+    manager: ParquetIncrementalManager,
+    snapshot: Optional[pd.DataFrame],
+) -> None:
+    if snapshot is not None:
+        snapshot.to_parquet(manager.metadata_file, index=False)
+    elif manager.metadata_file.exists():
+        manager.metadata_file.unlink()
+
+
+def _selection_backfill_window(
+    existing_range: tuple[pd.Timestamp, pd.Timestamp],
+    source_observed_until: pd.Timestamp,
+    requested_start_date: Optional[str | pd.Timestamp],
+    requested_end_day: pd.Timestamp,
+) -> Optional[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]]:
+    start_day, existing_end_day = existing_range
+    if requested_start_date is not None:
+        start_day = max(start_day, pd.to_datetime(requested_start_date).normalize())
+
+    end_day = min(existing_end_day, source_observed_until, requested_end_day)
+    if start_day > end_day:
+        return None
+
+    return start_day, end_day + pd.Timedelta(days=1), end_day
+
+
+def _process_demand_range(
+    conn,
+    schema: str,
+    table_name: str,
+    date_column: str,
+    up_rs: pd.DataFrame,
+    incremental_mgr: ParquetIncrementalManager,
+    period_start: pd.Timestamp,
+    period_end_exclusive: pd.Timestamp,
+    selected_rs: Optional[dict[str, str]],
+    selected_up: Optional[dict[str, str]],
+    build_global_outputs: bool = True,
+    build_rs_outputs: bool = True,
+    build_up_outputs: bool = True,
+    source_up_filter: Optional[list[str]] = None,
+    label: str = "period",
+) -> Optional[pd.Timestamp]:
+    df_chunk = get_data_for_year(
+        conn=conn,
+        schema=schema,
+        table_name=table_name,
+        date_column=date_column,
+        year_start=period_start,
+        year_end=period_end_exclusive,
+        last_loaded_date=None,
+        selected_cols=[
+            "DATA_VISITA",
+            "UP",
+            "VISI_LLOC_VISITA",
+            "VISI_SITUACIO_VISITA",
+            "SERVEI_CODI",
+            "TIPUS_CLASS",
+            "VISI_TIPUS_VISITA",
+        ],
+        normalized_up_values=source_up_filter,
+    )
+
+    if df_chunk.empty:
+        logger.info(f"No demand data for {label}")
+        return None
+
+    logger.info(f"Demand {label}: {len(df_chunk)} rows")
+
+    df_chunk = prepare_visits_chunk(df_chunk, up_rs=up_rs)
+    df_chunk = df_chunk[df_chunk["DATA_VISITA"] < period_end_exclusive].copy()
+    if df_chunk.empty:
+        logger.info(f"No demand rows on or before today for {label}")
+        return None
+
+    df_chunk["timestamp"] = df_chunk["DATA_VISITA"]
+    pieces = []
+
+    if build_global_outputs:
+        pieces.append(build_daily_total_cat_optimized(df_chunk).reset_index())
+        pieces.append(build_daily_features_global_optimized(df_chunk))
+
+    if build_rs_outputs:
+        pieces.append(
+            build_daily_features_by_group_optimized(
+                _filter_if_selected(df_chunk, "RS", selected_rs, _normalize_rs_values),
+                group_col="RS",
+            )
+        )
+
+    if build_up_outputs:
+        pieces.append(
+            build_daily_features_by_group_optimized(
+                _filter_if_selected(df_chunk, "UP", selected_up, _normalize_up_codes),
+                group_col="UP",
+            )
+        )
+
+    pieces = [piece for piece in pieces if not piece.empty]
+    if not pieces:
+        logger.info(f"No demand aggregates produced for {label}")
+        return None
+
+    daily = _build_wide_final_by_timestamp(
+        pd.concat(pieces, ignore_index=True, sort=False)
+    )
+    incremental_mgr.add_data(daily, timestamp_col="timestamp")
+    logger.info(f"Saved demand {label} daily aggregate ({len(daily)} rows)")
+    return df_chunk["timestamp"].max()
+
+
+def _process_demand_range_with_semester_retry(
+    **kwargs,
+) -> Optional[pd.Timestamp]:
+    period_start = kwargs["period_start"]
+    period_end_exclusive = kwargs["period_end_exclusive"]
+    label = kwargs.get("label", "period")
+
+    try:
+        return _process_demand_range(**kwargs)
+    except MemoryError:
+        subranges = _split_into_six_month_ranges(period_start, period_end_exclusive)
+        if len(subranges) <= 1:
+            raise
+
+        logger.warning(
+            f"Demand {label} exhausted memory; retrying in 6-month windows"
+        )
+        max_loaded = None
+        for sub_start, sub_end in subranges:
+            sub_kwargs = dict(kwargs)
+            sub_kwargs["period_start"] = sub_start
+            sub_kwargs["period_end_exclusive"] = sub_end
+            sub_kwargs["label"] = (
+                f"{sub_start.date()} -> {(sub_end - pd.Timedelta(days=1)).date()}"
+            )
+            loaded = _process_demand_range(**sub_kwargs)
+            if pd.notna(loaded) and (max_loaded is None or loaded > max_loaded):
+                max_loaded = loaded
+        return max_loaded
+
+
 def run_incremental_pipeline_optimized(
     db_server: str,
     db_database: str,
@@ -275,6 +505,81 @@ def run_incremental_pipeline_optimized(
         )
         source_observed_until = min(pd.to_datetime(max_date).normalize(), requested_end_day)
 
+        missing_rs, missing_up = _missing_selected_geos(
+            final_store,
+            selected_rs,
+            selected_up,
+        )
+        existing_range = _existing_observed_range(final_store)
+        backfilled_selection = False
+        if existing_range and (missing_rs or missing_up):
+            backfill_window = _selection_backfill_window(
+                existing_range=existing_range,
+                source_observed_until=source_observed_until,
+                requested_start_date=start_date,
+                requested_end_day=requested_end_day,
+            )
+            if backfill_window is not None:
+                backfill_start, backfill_end_exclusive, backfill_max_day = backfill_window
+                source_up_filter = sorted(
+                    set(missing_up.keys())
+                    | set(_source_ups_for_selected_rs(up_rs, missing_rs))
+                )
+                if source_up_filter:
+                    logger.info(
+                        "Backfilling missing demand selections only: "
+                        f"{len(missing_rs)} RS, {len(missing_up)} UP; "
+                        f"{backfill_start.date()} -> {backfill_max_day.date()}"
+                    )
+                    metadata_before_backfill = _metadata_snapshot(incremental_mgr)
+                    backfill_max_loaded = None
+                    for period_start, period_end in _split_into_six_month_ranges(
+                        backfill_start,
+                        backfill_end_exclusive,
+                    ):
+                        loaded = _process_demand_range(
+                            conn=conn,
+                            schema=schema,
+                            table_name=table_name,
+                            date_column=date_column,
+                            up_rs=up_rs,
+                            incremental_mgr=incremental_mgr,
+                            period_start=period_start,
+                            period_end_exclusive=period_end,
+                            selected_rs=missing_rs or {},
+                            selected_up=missing_up or {},
+                            build_global_outputs=False,
+                            build_rs_outputs=bool(missing_rs),
+                            build_up_outputs=bool(missing_up),
+                            source_up_filter=source_up_filter,
+                            label=(
+                                "selection backfill "
+                                f"{period_start.date()} -> "
+                                f"{(period_end - pd.Timedelta(days=1)).date()}"
+                            ),
+                        )
+                        if pd.notna(loaded) and (
+                            backfill_max_loaded is None or loaded > backfill_max_loaded
+                        ):
+                            backfill_max_loaded = loaded
+
+                    if backfill_max_loaded is not None:
+                        aggregate_final_optimized(
+                            incremental_mgr,
+                            final_store,
+                            observed_until=backfill_max_day,
+                            impute_until=requested_end_day,
+                            replace_overlapping_days=False,
+                        )
+                        backfilled_selection = True
+
+                    _restore_metadata_snapshot(incremental_mgr, metadata_before_backfill)
+                else:
+                    logger.warning(
+                        "Demand selections are missing from the final, but no matching "
+                        "source UP codes were found in UPperRS.xlsx."
+                    )
+
         window = get_incremental_processing_window(
             min_date=min_date,
             max_date=max_date,
@@ -290,6 +595,20 @@ def run_incremental_pipeline_optimized(
                 impute_until=requested_end_day,
             )
             return
+
+        if backfilled_selection and start_date is not None and existing_range:
+            requested_start_day = pd.to_datetime(start_date).normalize()
+            existing_start_day, existing_end_day = existing_range
+            explicit_end_day = min(source_observed_until, requested_end_day)
+            if (
+                existing_start_day <= requested_start_day
+                and existing_end_day >= explicit_end_day
+            ):
+                logger.info(
+                    "Requested demand range was already present; missing selection "
+                    "backfill completed without reloading the full range."
+                )
+                return
 
         start_date, end_exclusive, max_process_day = window
         logger.info(
@@ -309,81 +628,24 @@ def run_incremental_pipeline_optimized(
                 logger.info(f"No demand data on or before today for year {year}")
                 continue
 
-            # Query data efficiently
-            df_chunk = get_data_for_year(
+            chunk_max = _process_demand_range_with_semester_retry(
                 conn=conn,
                 schema=schema,
                 table_name=table_name,
                 date_column=date_column,
-                year_start=effective_year_start,
-                year_end=effective_year_end,
-                last_loaded_date=None,
-                selected_cols=[
-                    "DATA_VISITA",
-                    "UP",
-                    "VISI_LLOC_VISITA",
-                    "VISI_SITUACIO_VISITA",
-                    "SERVEI_CODI",
-                    "TIPUS_CLASS",
-                    "VISI_TIPUS_VISITA",
-                ],
-            )
-
-            if df_chunk.empty:
-                logger.info(f"No data for year {year}")
-                continue
-
-            logger.info(f"Year {year}: {len(df_chunk)} rows")
-
-            # Transform chunk
-            df_chunk = prepare_visits_chunk(df_chunk, up_rs=up_rs)
-            df_chunk = df_chunk[df_chunk["DATA_VISITA"] < end_exclusive].copy()
-            if df_chunk.empty:
-                logger.info(f"No demand rows on or before today for year {year}")
-                continue
-
-            # Rename timestamp column for consistency
-            df_chunk["timestamp"] = df_chunk["DATA_VISITA"]
-
-            # Build aggregations efficiently
-            cat_daily = build_daily_total_cat_optimized(df_chunk)
-            global_daily = build_daily_features_global_optimized(df_chunk)
-            rs_daily = build_daily_features_by_group_optimized(
-                _filter_if_selected(df_chunk, "RS", selected_rs, _normalize_rs_values),
-                group_col="RS",
-            )
-            up_daily = build_daily_features_by_group_optimized(
-                _filter_if_selected(df_chunk, "UP", selected_up, _normalize_up_codes),
-                group_col="UP",
-            )
-
-            # Store one already-aggregated daily file per processed year.
-            yearly_daily = _build_wide_final_by_timestamp(
-                pd.concat(
-                    [
-                        cat_daily.reset_index(),
-                        global_daily,
-                        rs_daily,
-                        up_daily,
-                    ],
-                    ignore_index=True,
-                    sort=False,
-                )
-            )
-            incremental_mgr.add_data(yearly_daily, timestamp_col="timestamp")
-            logger.info(
-                f"Saved demand year {year} daily aggregate "
-                f"({len(yearly_daily)} rows)"
+                up_rs=up_rs,
+                incremental_mgr=incremental_mgr,
+                period_start=effective_year_start,
+                period_end_exclusive=effective_year_end,
+                selected_rs=selected_rs,
+                selected_up=selected_up,
+                label=f"year {year}",
             )
 
             # Track max date
-            chunk_max = df_chunk["timestamp"].max()
             if pd.notna(chunk_max):
                 if global_max_loaded is None or chunk_max > global_max_loaded:
                     global_max_loaded = chunk_max
-
-            # Clean up
-            del df_chunk, cat_daily, global_daily, rs_daily, up_daily, yearly_daily
 
         # Aggregate to final
         logger.info("Aggregating to final output...")

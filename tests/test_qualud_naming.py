@@ -4,6 +4,7 @@ from pipelines.demand.aggregation_optimized import (
     build_daily_features_by_group_optimized,
     build_daily_features_global_optimized,
     build_daily_total_cat_optimized,
+    _merge_with_existing_final,
 )
 from pipelines.diagnosis.aggregation_optimized import (
     build_daily_diagnosis_by_group_optimized,
@@ -11,11 +12,13 @@ from pipelines.diagnosis.aggregation_optimized import (
     build_daily_total_general_optimized,
     build_diagnosis_wide_format_optimized,
     _build_diagnosis_wide_final,
+    _merge_with_existing_diagnosis_final,
 )
 from pipelines.diagnosis.incremental_optimized import (
     _expand_diagnosis_code_spec,
     _filter_if_selected as _filter_selected_diagnosis_geo,
     _load_selected_codes,
+    get_diagnosis_data_for_year_optimized,
 )
 from pipelines.demand.incremental_optimized import (
     _filter_if_selected as _filter_selected_demand_geo,
@@ -24,6 +27,14 @@ from pipelines.demand.incremental_optimized import (
 )
 from pipelines.shared.final_joiner import FinalDataJoiner
 from pipelines.sample_runner import run_sample_diagnosis_pipeline
+
+
+class _FinalStoreStub:
+    def __init__(self, df):
+        self._df = df
+
+    def load_final(self):
+        return self._df.copy()
 
 
 def test_demand_columns_follow_qualud_ideal_naming():
@@ -171,6 +182,98 @@ def test_geo_selection_maps_source_values_to_configured_subset_ids():
     assert demand_up["UP"].tolist() == ["MICRO_01"]
     assert diagnosis_rs["RS"].tolist() == ["RS_64"]
     assert diagnosis_up["UP"].tolist() == ["MICRO_01"]
+
+
+def test_partial_demand_merge_adds_missing_selection_without_replacing_day():
+    existing = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "DEMAND__TOTAL": [10, 20],
+            "DEMAND__TOTAL__UP__MICRO_01": [1, 2],
+        }
+    )
+    new = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01"]),
+            "DEMAND__TOTAL__UP__MICRO_09": [3],
+        }
+    )
+
+    merged = _merge_with_existing_final(
+        new,
+        _FinalStoreStub(existing),
+        replace_overlapping_days=False,
+    )
+
+    row = merged.set_index("timestamp").loc[pd.Timestamp("2026-01-01")]
+    later = merged.set_index("timestamp").loc[pd.Timestamp("2026-01-02")]
+    assert row["DEMAND__TOTAL"] == 10
+    assert row["DEMAND__TOTAL__UP__MICRO_01"] == 1
+    assert row["DEMAND__TOTAL__UP__MICRO_09"] == 3
+    assert later["DEMAND__TOTAL__UP__MICRO_09"] == 0
+
+
+def test_partial_diagnosis_merge_adds_missing_selection_without_replacing_day():
+    existing = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "DIAGNOSIS__TOTAL": [10, 20],
+            "DIAGNOSIS__TOTAL__UP__MICRO_01": [1, 2],
+        }
+    )
+    new = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01"]),
+            "DIAGNOSIS__TOTAL__UP__MICRO_09": [3],
+        }
+    )
+
+    merged = _merge_with_existing_diagnosis_final(
+        new,
+        _FinalStoreStub(existing),
+        replace_overlapping_days=False,
+    )
+
+    row = merged.set_index("timestamp").loc[pd.Timestamp("2026-01-01")]
+    later = merged.set_index("timestamp").loc[pd.Timestamp("2026-01-02")]
+    assert row["DIAGNOSIS__TOTAL"] == 10
+    assert row["DIAGNOSIS__TOTAL__UP__MICRO_01"] == 1
+    assert row["DIAGNOSIS__TOTAL__UP__MICRO_09"] == 3
+    assert later["DIAGNOSIS__TOTAL__UP__MICRO_09"] == 0
+
+
+def test_diagnosis_query_can_filter_normalized_up_and_code_values(monkeypatch):
+    captured = {}
+
+    def fake_read_sql_query(query, conn, params):
+        captured["query"] = query
+        captured["params"] = params
+        return pd.DataFrame()
+
+    monkeypatch.setattr(pd, "read_sql_query", fake_read_sql_query)
+
+    get_diagnosis_data_for_year_optimized(
+        conn=object(),
+        schema="dbo",
+        table_name="diagnosis",
+        date_column="DATA",
+        up_column="UP",
+        diag_code_column="DIAG",
+        year_start=pd.Timestamp("2024-01-01"),
+        year_end=pd.Timestamp("2024-07-01"),
+        normalized_up_values=["00370"],
+        normalized_diag_codes=["J00", "J01"],
+    )
+
+    assert "RIGHT('00000' + LTRIM(RTRIM(CAST([UP] AS VARCHAR(20)))), 5)" in captured["query"]
+    assert "UPPER(LEFT(LTRIM(RTRIM(CAST([DIAG] AS VARCHAR(50)))), 3)) IN (?, ?)" in captured["query"]
+    assert captured["params"] == [
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-07-01"),
+        "00370",
+        "J00",
+        "J01",
+    ]
 
 
 def test_sample_diagnosis_pipeline_uses_configured_groups_and_geo_ids(tmp_path):

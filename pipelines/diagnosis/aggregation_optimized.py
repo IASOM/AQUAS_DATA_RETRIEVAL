@@ -284,6 +284,7 @@ def aggregate_diagnosis_final_optimized(
     clear_incremental: bool = True,
     observed_until: Optional[pd.Timestamp] = None,
     impute_until: Optional[pd.Timestamp] = None,
+    replace_overlapping_days: bool = True,
 ) -> pd.DataFrame:
     """
     Efficiently aggregate incremental diagnosis data to final output.
@@ -329,7 +330,12 @@ def aggregate_diagnosis_final_optimized(
         return pd.DataFrame()
 
     df = _combine_diagnosis_wide_parts(parts, timestamp_col)
-    df = _merge_with_existing_diagnosis_final(df, final_store, timestamp_col)
+    df = _merge_with_existing_diagnosis_final(
+        df,
+        final_store,
+        timestamp_col,
+        replace_overlapping_days=replace_overlapping_days,
+    )
 
     if impute_until is not None:
         df = impute_tail_to_date(
@@ -559,6 +565,7 @@ def _merge_with_existing_diagnosis_final(
     new_df: pd.DataFrame,
     final_store,
     timestamp_col: str = "timestamp",
+    replace_overlapping_days: bool = True,
 ) -> pd.DataFrame:
     """Merge new diagnosis final rows with the existing final parquet."""
     existing_df = final_store.load_final()
@@ -575,6 +582,14 @@ def _merge_with_existing_diagnosis_final(
 
     existing_idx = existing_df.set_index(timestamp_col)
     new_idx = new_df.set_index(timestamp_col)
+
+    if not replace_overlapping_days:
+        combined = existing_idx.combine_first(new_idx)
+        for col in new_idx.columns:
+            combined.loc[new_idx.index, col] = new_idx[col]
+        combined = combined.sort_index().fillna(0)
+        combined.index.name = timestamp_col
+        return combined.reset_index()
 
     # Replace complete overlapping days with the new aggregate. This avoids
     # double-counting and prevents stale values from surviving in columns that

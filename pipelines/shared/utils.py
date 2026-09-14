@@ -254,28 +254,35 @@ def get_data_for_year(
     year_end: pd.Timestamp,
     last_loaded_date: Optional[pd.Timestamp] = None,
     selected_cols: Optional[list[str]] = None,
+    normalized_up_values: Optional[list[str]] = None,
+    up_column: str = "UP",
 ) -> pd.DataFrame:
     """Query data for a specific year, optionally filtering by last loaded date."""
     cols_sql = ", ".join(f"[{c}]" for c in selected_cols)
+    params = [year_start, year_end]
+    filters = [
+        f"[{date_column}] >= ?",
+        f"[{date_column}] < ?",
+    ]
 
-    if last_loaded_date is None:
-        query = f"""
-        SELECT {cols_sql}
-        FROM [{schema}].[{table_name}]
-        WHERE [{date_column}] >= ?
-            AND [{date_column}] < ?
-        ORDER BY [{date_column}] ASC
-        """
-        params = [year_start, year_end]
-    else:
-        query = f"""
-        SELECT {cols_sql}
-        FROM [{schema}].[{table_name}]
-        WHERE [{date_column}] >= ?
-            AND [{date_column}] < ?
-            AND [{date_column}] > ?
-        ORDER BY [{date_column}] ASC
-        """
-        params = [year_start, year_end, last_loaded_date]
+    if last_loaded_date is not None:
+        filters.append(f"[{date_column}] > ?")
+        params.append(last_loaded_date)
+
+    if normalized_up_values:
+        placeholders = ", ".join("?" for _ in normalized_up_values)
+        filters.append(
+            f"RIGHT('00000' + LTRIM(RTRIM(CAST([{up_column}] AS VARCHAR(20)))), 5) "
+            f"IN ({placeholders})"
+        )
+        params.extend(normalized_up_values)
+
+    where_sql = "\n            AND ".join(filters)
+    query = f"""
+    SELECT {cols_sql}
+    FROM [{schema}].[{table_name}]
+    WHERE {where_sql}
+    ORDER BY [{date_column}] ASC
+    """
 
     return pd.read_sql_query(query, conn, params=params)

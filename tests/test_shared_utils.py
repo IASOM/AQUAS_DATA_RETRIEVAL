@@ -1,6 +1,10 @@
 import pandas as pd
 
-from pipelines.shared.utils import get_incremental_processing_window, get_min_max_date
+from pipelines.shared.utils import (
+    get_data_for_year,
+    get_incremental_processing_window,
+    get_min_max_date,
+)
 
 
 def test_get_min_max_date_applies_upper_bound_before_database_max(monkeypatch):
@@ -49,3 +53,34 @@ def test_incremental_window_processes_only_observed_source_days_before_imputatio
         pd.Timestamp("2026-05-28"),
         pd.Timestamp("2026-05-27"),
     )
+
+
+def test_get_data_for_year_can_filter_normalized_up_values(monkeypatch):
+    captured = {}
+
+    def fake_read_sql_query(query, conn, params):
+        captured["query"] = query
+        captured["params"] = params
+        return pd.DataFrame()
+
+    monkeypatch.setattr(pd, "read_sql_query", fake_read_sql_query)
+
+    get_data_for_year(
+        conn=object(),
+        schema="dbo",
+        table_name="visits",
+        date_column="DATA",
+        year_start=pd.Timestamp("2024-01-01"),
+        year_end=pd.Timestamp("2024-07-01"),
+        selected_cols=["DATA", "UP"],
+        normalized_up_values=["00370", "03311"],
+    )
+
+    assert "RIGHT('00000' + LTRIM(RTRIM(CAST([UP] AS VARCHAR(20)))), 5)" in captured["query"]
+    assert "IN (?, ?)" in captured["query"]
+    assert captured["params"] == [
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-07-01"),
+        "00370",
+        "03311",
+    ]
