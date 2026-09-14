@@ -15,6 +15,7 @@ nav:
   - Naming: naming.md
   - Diagnosis And Territory Selections: selections.md
   - Outputs: outputs.md
+  - PREDAP Alarms: predap-alarms.md
   - Validation: validation.md
 
 markdown_extensions:
