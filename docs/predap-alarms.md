@@ -81,8 +81,21 @@ n_top5_mean_5y = mitjana de x_u(t) en aquests dies
 n_median_5y = mediana diaria dels ultims 5 anys
 ```
 
-Per configurar alarmes, `n_p95_5y` es el llindar natural de volum alt. La resta
-de camps serveixen per documentar el volum real que representa el 5% superior.
+Per configurar alarmes diaries, `n_p95_5y` es el llindar natural de volum alt.
+Per alarmes a horitzo, cal usar el percentil 95 de la suma acumulada d'aquell
+horitzo:
+
+```text
+n_p95_7d_5y = percentil 95 de la suma mobil de 7 dies
+n_p95_14d_5y = percentil 95 de la suma mobil de 14 dies
+n_p95_30d_5y = percentil 95 de la suma mobil de 30 dies
+n_p95_60d_5y = percentil 95 de la suma mobil de 60 dies
+n_p95_182d_5y = percentil 95 de la suma mobil de 182 dies
+n_p95_365d_5y = percentil 95 de la suma mobil de 365 dies
+```
+
+La resta de camps `n_top5_*` documenten el volum real que representa el 5%
+superior, tant diari com per horitzo.
 
 ## Creixement percentual
 
@@ -145,7 +158,7 @@ Una alarma de creixement nomes s'hauria d'activar si compleix totes les
 condicions:
 
 ```text
-recent_w >= max(10, 0.25 * n_p95_5y * w)
+recent_w >= max(10, 0.25 * n_p95_w_5y)
 previous_w >= min_baseline_w
 growth_pct_w >= threshold_w
 ```
@@ -181,16 +194,40 @@ n_top5_days_5y
 n_top5_sum_5y
 n_top5_mean_5y
 n_median_5y
+n_p95_7d_5y
+n_top5_windows_7d_5y
+n_top5_sum_7d_5y
+n_top5_mean_7d_5y
 growth_yellow_7d
 growth_red_7d
+n_p95_14d_5y
+n_top5_windows_14d_5y
+n_top5_sum_14d_5y
+n_top5_mean_14d_5y
 growth_yellow_14d
 growth_red_14d
+n_p95_30d_5y
+n_top5_windows_30d_5y
+n_top5_sum_30d_5y
+n_top5_mean_30d_5y
 growth_yellow_30d
 growth_red_30d
+n_p95_60d_5y
+n_top5_windows_60d_5y
+n_top5_sum_60d_5y
+n_top5_mean_60d_5y
 growth_yellow_60d
 growth_red_60d
+n_p95_182d_5y
+n_top5_windows_182d_5y
+n_top5_sum_182d_5y
+n_top5_mean_182d_5y
 growth_yellow_182d
 growth_red_182d
+n_p95_365d_5y
+n_top5_windows_365d_5y
+n_top5_sum_365d_5y
+n_top5_mean_365d_5y
 growth_yellow_365d
 growth_red_365d
 min_recent_7d
@@ -290,7 +327,10 @@ for unit in units:
 
         row[f"growth_yellow_{w}d"] = float(max(BASE_YELLOW[w], p95_growth))
         row[f"growth_red_{w}d"] = float(max(BASE_RED[w], p99_growth))
-        row[f"min_recent_{w}d"] = float(max(10, 0.25 * n_p95 * w))
+        recent = s.rolling(w, min_periods=w).sum()
+        n_p95_w = recent.dropna().quantile(0.95)
+        row[f"n_p95_{w}d_5y"] = float(n_p95_w)
+        row[f"min_recent_{w}d"] = float(max(10, 0.25 * n_p95_w))
 
     row["quality_flag"] = "ok" if s.shape[0] >= 365 * 3 and s.sum() >= 100 else "low_volume"
     rows.append(row)
@@ -302,7 +342,8 @@ pd.DataFrame(rows).to_csv("predap_alarm_thresholds.csv", index=False)
 
 Per arrencar configuracio:
 
-- Usar `n_p95_5y` com a llindar de volum alt per unitat.
+- Usar `n_p95_5y` com a llindar de volum alt diari per unitat.
+- Usar `n_p95_<horitzo>d_5y` com a llindar de volum alt acumulat per horitzo.
 - Usar `growth_yellow_30d` i `growth_red_30d` com a alarma principal.
 - Usar 7 i 14 dies com a alarmes rapides, pero amb `min_recent` activat.
 - Usar 182 i 365 dies com a alarmes de tendencia, no com a urgencia.

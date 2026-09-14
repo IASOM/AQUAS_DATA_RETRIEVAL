@@ -102,7 +102,7 @@ def calculate_thresholds(input_file: Path, years: int = 5) -> pd.DataFrame:
         }
 
         for window in WINDOWS:
-            _add_window_thresholds(row, series, n_p95, window)
+            _add_window_thresholds(row, series, window)
 
         row["quality_flag"] = _quality_flag(series)
         rows.append(row)
@@ -164,11 +164,14 @@ def _parse_unit_name(unit: str) -> dict[str, str]:
 def _add_window_thresholds(
     row: dict[str, object],
     series: pd.Series,
-    n_p95: float,
     window: int,
 ) -> None:
-    recent = series.rolling(window).sum()
+    recent = series.rolling(window, min_periods=window).sum()
     previous = recent.shift(window)
+    n_p95_window = (
+        float(recent.dropna().quantile(0.95)) if not recent.dropna().empty else 0.0
+    )
+    top5_window = recent[recent >= n_p95_window].dropna()
     observed_previous = previous.dropna()
     min_baseline = (
         max(5.0, float(observed_previous.quantile(0.25)))
@@ -185,9 +188,15 @@ def _add_window_thresholds(
         float(positive_growth.quantile(0.99)) if not positive_growth.empty else 0.0
     )
 
+    row[f"n_p95_{window}d_5y"] = n_p95_window
+    row[f"n_top5_windows_{window}d_5y"] = int(top5_window.shape[0])
+    row[f"n_top5_sum_{window}d_5y"] = float(top5_window.sum())
+    row[f"n_top5_mean_{window}d_5y"] = (
+        float(top5_window.mean()) if not top5_window.empty else 0.0
+    )
     row[f"growth_yellow_{window}d"] = float(max(BASE_YELLOW[window], p95_growth))
     row[f"growth_red_{window}d"] = float(max(BASE_RED[window], p99_growth))
-    row[f"min_recent_{window}d"] = float(max(10.0, 0.25 * n_p95 * window))
+    row[f"min_recent_{window}d"] = float(max(10.0, 0.25 * n_p95_window))
     row[f"min_baseline_{window}d"] = min_baseline
 
 
